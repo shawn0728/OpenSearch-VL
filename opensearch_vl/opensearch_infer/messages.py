@@ -54,6 +54,53 @@ def to_claude_messages(contents: Iterable[Dict[str, Any]]) -> List[Dict[str, Any
     return messages
 
 
+def to_minimax_messages(contents: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert Gemini-style ``contents`` to MiniMax content blocks.
+
+    MiniMax exposes an Anthropic-compatible Messages API, so images are
+    emitted as ``{"type": "image", "source": {...}}`` blocks with either a
+    ``url`` or ``base64`` source, matching the Anthropic wire format.
+    """
+
+    messages: List[Dict[str, Any]] = []
+    for item in contents:
+        role = item.get("role", "user")
+        parts = item.get("parts", []) or []
+        block: List[Dict[str, Any]] = []
+        for part in parts:
+            if "image_url" in part:
+                value = part["image_url"]
+                url = value.get("url", "") if isinstance(value, dict) else str(value)
+                if url:
+                    block.append(
+                        {"type": "image", "source": {"type": "url", "url": url}}
+                    )
+            elif "inline_data" in part:
+                data = part["inline_data"]
+                payload = data.get("data", "")
+                if "base64," in payload:
+                    payload = payload.split("base64,", 1)[1]
+                mime = data.get("mime_type", "") or image_io.detect_image_format(
+                    payload
+                )
+                block.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime,
+                            "data": payload,
+                        },
+                    }
+                )
+            elif "text" in part:
+                block.append({"type": "text", "text": part["text"]})
+        if block:
+            minimax_role = "assistant" if role == "model" else role
+            messages.append({"role": minimax_role, "content": block})
+    return messages
+
+
 def _resolve_image_url_to_pil(url: str) -> Image.Image | None:
     """Try the network first, then fall back to ``FVQA_IMAGE_DIR``."""
 

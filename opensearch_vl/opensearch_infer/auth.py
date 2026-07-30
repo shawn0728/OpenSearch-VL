@@ -151,3 +151,76 @@ class ClaudeGatewayClient:
         except requests.RequestException as exc:
             logger.error("Claude gateway request failed: %s", exc)
             raise
+
+
+class MiniMaxClient:
+    """Thin client for the MiniMax Anthropic-compatible Messages API.
+
+    The endpoint mirrors the Anthropic ``/v1/messages`` contract and is
+    authenticated with a Bearer token. Both the global (``api.minimax.io``)
+    and China (``api.minimaxi.com``) hosts share the same wire format; the
+    base URL is selected via :mod:`config`.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: Optional[str] = None,
+        api_version: Optional[str] = None,
+        timeout: int = 3600,
+    ) -> None:
+        if not api_key:
+            raise ValueError(
+                "MiniMaxClient requires an API key. Set MINIMAX_API_KEY."
+            )
+        self.api_key = api_key
+        self.base_url = (base_url or config.MINIMAX_ANTHROPIC_BASE_URL).rstrip("/")
+        self.api_version = api_version or config.MINIMAX_API_VERSION
+        self.timeout = timeout
+
+    @classmethod
+    def from_env(cls) -> "MiniMaxClient":
+        """Build a client from the standard ``MINIMAX_*`` env vars."""
+
+        return cls(
+            api_key=config.MINIMAX_API_KEY,
+            base_url=config.MINIMAX_ANTHROPIC_BASE_URL,
+            api_version=config.MINIMAX_API_VERSION,
+        )
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "anthropic-version": self.api_version,
+            "Content-Type": "application/json",
+        }
+
+    def call(
+        self,
+        model: str,
+        messages: Iterable[Mapping],
+        system_instruction: Optional[str] = None,
+        max_tokens: int = 32768,
+        timeout: Optional[int] = None,
+    ) -> requests.Response:
+        """POST to ``/v1/messages`` and return the raw response."""
+
+        body: dict = {
+            "model": model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+        }
+        if system_instruction:
+            body["system"] = system_instruction
+
+        url = f"{self.base_url}/v1/messages"
+        request_timeout = timeout if timeout is not None else self.timeout
+        try:
+            response = requests.post(
+                url, headers=self._headers(), json=body, timeout=request_timeout
+            )
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            logger.error("MiniMax request failed: %s", exc)
+            raise
