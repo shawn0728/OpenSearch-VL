@@ -197,6 +197,91 @@ class ClaudeRunner(BaseRunner):
 
 
 # ---------------------------------------------------------------------------
+# MiniMax
+# ---------------------------------------------------------------------------
+
+
+class MiniMaxRunner(BaseRunner):
+    """Drives the MiniMax Anthropic-compatible Messages API."""
+
+    def __init__(self, spec: ModelSpec) -> None:
+        super().__init__(spec)
+        self.client: Optional[auth.MiniMaxClient] = None
+
+    @property
+    def api_model(self) -> str:
+        return self.spec.extra.get("api_model", self.spec.display_name)
+
+    def load(self) -> None:
+        self.client = auth.MiniMaxClient.from_env()
+
+    def infer(
+        self,
+        contents: Iterable[Dict[str, Any]],
+        system_instruction: Optional[str] = None,
+        cfg: Optional[InferenceConfig] = None,
+    ) -> Dict[str, Any]:
+        if self.client is None:
+            self.load()
+        cfg = cfg or InferenceConfig()
+        try:
+            minimax_messages = messages.to_minimax_messages(contents)
+            response = self.client.call(  # type: ignore[union-attr]
+                model=self.api_model,
+                messages=minimax_messages,
+                system_instruction=system_instruction,
+                max_tokens=cfg.max_tokens,
+            )
+        except Exception as exc:
+            logger.error("MiniMax inference failed: %s", exc)
+            return _empty_response(self.display_name, str(exc))
+
+        try:
+            response_json = response.json()
+        except ValueError as exc:
+            return _empty_response(self.display_name, f"Invalid JSON: {exc}")
+
+        if response_json.get("type") == "error":
+            error = response_json.get("error", {}) or {}
+            return _empty_response(
+                self.display_name, error.get("message", "Unknown error")
+            )
+
+        text_parts: List[Dict[str, str]] = []
+        for item in response_json.get("content", []) or []:
+            if item.get("type") == "text" and item.get("text"):
+                text_parts.append({"text": item["text"]})
+
+        finish = response_json.get("stop_reason") or "STOP"
+
+        usage_metadata: Dict[str, int] = {}
+        usage = response_json.get("usage", {}) or {}
+        if usage:
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            usage_metadata = {
+                "promptTokenCount": input_tokens,
+                "candidatesTokenCount": output_tokens,
+                "totalTokenCount": input_tokens + output_tokens,
+            }
+
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": text_parts or [{"text": ""}],
+                    },
+                    "finishReason": finish,
+                }
+            ],
+            "usageMetadata": usage_metadata,
+            "modelVersion": self.display_name,
+            "raw_response": response_json,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Qwen3-VL (dense and MoE)
 # ---------------------------------------------------------------------------
 
@@ -640,6 +725,8 @@ def build_runner(
     spec = config.MODEL_REGISTRY[model_name]
     if spec.family == "claude":
         return ClaudeRunner(spec)
+    if spec.family == "minimax":
+        return MiniMaxRunner(spec)
     return Qwen3VLRunner(
         spec,
         checkpoint=config.resolve_checkpoint(spec, checkpoint),

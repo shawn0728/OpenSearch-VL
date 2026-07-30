@@ -90,6 +90,54 @@ CLAUDE_MODEL_MARKER: str = os.environ.get(
 
 
 # ---------------------------------------------------------------------------
+# MiniMax API backend (Bearer-authenticated, Anthropic-compatible endpoint)
+# ---------------------------------------------------------------------------
+
+# ``MINIMAX_API_REGION`` selects the default endpoints:
+#   * ``global_en`` -> api.minimax.io  (docs at platform.minimax.io)
+#   * ``cn_zh``     -> api.minimaxi.com (docs at platform.minimaxi.com)
+# An explicit ``MINIMAX_*_BASE_URL`` override always wins.
+MINIMAX_API_REGION: str = os.environ.get("MINIMAX_API_REGION", "global_en")
+
+MINIMAX_REGION_ENDPOINTS: Dict[str, Dict[str, str]] = {
+    "global_en": {
+        "openai_base_url": "https://api.minimax.io/v1",
+        "anthropic_base_url": "https://api.minimax.io/anthropic",
+    },
+    "cn_zh": {
+        "openai_base_url": "https://api.minimaxi.com/v1",
+        "anthropic_base_url": "https://api.minimaxi.com/anthropic",
+    },
+}
+
+
+def minimax_region_endpoints(region: Optional[str] = None) -> Dict[str, str]:
+    """Return the endpoint pair for ``region`` (falls back to ``global_en``)."""
+
+    key = (region or MINIMAX_API_REGION).strip()
+    return MINIMAX_REGION_ENDPOINTS.get(key, MINIMAX_REGION_ENDPOINTS["global_en"])
+
+
+MINIMAX_API_KEY: str = os.environ.get("MINIMAX_API_KEY", "")
+MINIMAX_ANTHROPIC_BASE_URL: str = os.environ.get(
+    "MINIMAX_ANTHROPIC_BASE_URL",
+    minimax_region_endpoints()["anthropic_base_url"],
+)
+MINIMAX_OPENAI_BASE_URL: str = os.environ.get(
+    "MINIMAX_OPENAI_BASE_URL",
+    minimax_region_endpoints()["openai_base_url"],
+)
+# Anthropic-style API version header sent with every request.
+MINIMAX_API_VERSION: str = os.environ.get("MINIMAX_API_VERSION", "2023-06-01")
+
+
+def minimax_enabled() -> bool:
+    """Return ``True`` when the MiniMax API key is configured."""
+
+    return bool(MINIMAX_API_KEY)
+
+
+# ---------------------------------------------------------------------------
 # COS uploader bootstrap. We keep this isolated so the package can run
 # without the optional internal uploader.
 # ---------------------------------------------------------------------------
@@ -116,7 +164,7 @@ class ModelSpec:
     """Static metadata describing one supported model variant."""
 
     name: str
-    family: str  # "qwen3_vl_dense" | "qwen3_vl_moe" | "claude"
+    family: str  # "qwen3_vl_dense" | "qwen3_vl_moe" | "claude" | "minimax"
     display_name: str
     default_checkpoint_env: Optional[str] = None
     default_checkpoint: str = ""
@@ -154,6 +202,32 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         display_name="Claude Opus 4.5",
         default_checkpoint="",
         supports_multi_gpu=False,
+    ),
+    "minimax-m3": ModelSpec(
+        name="minimax-m3",
+        family="minimax",
+        display_name="MiniMax-M3",
+        default_checkpoint="",
+        supports_multi_gpu=False,
+        extra={
+            "api_model": "MiniMax-M3",
+            "context_window": "1000000",
+            "input_modalities": "text,image,video",
+            "thinking": "adaptive,disabled",
+        },
+    ),
+    "minimax-m2.7": ModelSpec(
+        name="minimax-m2.7",
+        family="minimax",
+        display_name="MiniMax-M2.7",
+        default_checkpoint="",
+        supports_multi_gpu=False,
+        extra={
+            "api_model": "MiniMax-M2.7",
+            "context_window": "204800",
+            "input_modalities": "text",
+            "thinking": "always_on",
+        },
     ),
 }
 

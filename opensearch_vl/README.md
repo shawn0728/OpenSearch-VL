@@ -26,7 +26,7 @@ opensearch_vl/
     |-- search.py             # text_search / image_search / layout_parsing
     |-- tools.py              # JSON schema + parsing + tool dispatcher
     |-- messages.py           # Gemini <-> Claude / Qwen3-VL converters
-    |-- runners.py            # Inference runners (Claude + dense + MoE)
+    |-- runners.py            # Inference runners (Claude + MiniMax + dense + MoE)
     `-- pipeline.py           # Per-case multi-turn agent loop
 ```
 
@@ -59,6 +59,9 @@ opensearch_vl/
      (or the `--checkpoint` flag).
    - **For the Claude backend**: `CLAUDE_API_HOST`, `CLAUDE_API_USER`
      and `CLAUDE_API_KEY`.
+   - **For the MiniMax backend**: `MINIMAX_API_KEY` (plus optionally
+     `MINIMAX_API_REGION` to switch between the global and China
+     endpoints, or an explicit `MINIMAX_ANTHROPIC_BASE_URL`).
    - **For `text_search` / `image_search`**: either the gateway triple
      (`API_HOST` + `API_USER` + `API_KEY`) or direct provider keys
      (`SERPER_API_KEY` + `JINA_API_KEY`), plus a Qwen-compatible chat
@@ -89,6 +92,11 @@ opensearch_vl/
    python run_infer.py --model claude \
        --data-path /data/fvqa_test.parquet \
        --output-dir ./outputs/fvqa_test_claude
+
+   # MiniMax-M3 via the Anthropic-compatible API (no GPUs needed)
+   python run_infer.py --model minimax-m3 \
+       --data-path /data/fvqa_test.parquet \
+       --output-dir ./outputs/fvqa_test_minimax_m3
    ```
 
    `run_infer.sh` is a thin wrapper that sources environment variables

@@ -16,6 +16,12 @@ Use Claude Opus 4.5 (no local GPUs needed; requires CLAUDE_API_* env vars)::
         --data-path /data/fvqa_test.parquet \
         --output-dir ./outputs/fvqa_test_claude
 
+Use MiniMax-M3 (no local GPUs needed; requires MINIMAX_API_KEY)::
+
+    python run_infer.py --model minimax-m3 \
+        --data-path /data/fvqa_test.parquet \
+        --output-dir ./outputs/fvqa_test_minimax_m3
+
 Switch to the MoE 30B-A3B variant::
 
     python run_infer.py --model 30b-a3b --gpus 0,1,2,3 \

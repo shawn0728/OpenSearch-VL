@@ -12,7 +12,7 @@ FVQA-style benchmarks. The package is split into:
 * ``search``        - text_search, image_search and layout_parsing clients
 * ``tools``         - JSON tool schema, parsing helpers and the dispatcher
 * ``messages``      - Gemini <-> Claude / Qwen3-VL message converters
-* ``runners``       - inference runners (Claude API, dense Qwen3-VL, MoE)
+* ``runners``       - inference runners (Claude API, MiniMax API, dense Qwen3-VL, MoE)
 * ``pipeline``      - per-case multi-turn orchestration loop
 
 The unified entrypoint is :mod:`run_infer` at the project root.
