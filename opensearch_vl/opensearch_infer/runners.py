@@ -247,10 +247,14 @@ class MiniMaxRunner(BaseRunner):
                 self.display_name, error.get("message", "Unknown error")
             )
 
-        text_parts: List[Dict[str, str]] = []
+        text_parts: List[Dict[str, Any]] = []
         for item in response_json.get("content", []) or []:
-            if item.get("type") == "text" and item.get("text"):
-                text_parts.append({"text": item["text"]})
+            # The pipeline replays these parts on the next turn. Keep the full
+            # native block, including thinking signatures and tool-use content.
+            part: Dict[str, Any] = {"minimax_block": item}
+            if item.get("type") == "text":
+                part["text"] = item.get("text", "")
+            text_parts.append(part)
 
         finish = response_json.get("stop_reason") or "STOP"
 

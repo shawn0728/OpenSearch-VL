@@ -203,6 +203,19 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         default_checkpoint="",
         supports_multi_gpu=False,
     ),
+    "minimax-m3.1-flash": ModelSpec(
+        name="minimax-m3.1-flash",
+        family="minimax",
+        display_name="MiniMax-M3.1-Flash",
+        supports_multi_gpu=False,
+        extra={
+            "api_model": "MiniMax-M3.1-Flash",
+            "context_window": "1000000",
+            "max_output_tokens": "524288",
+            "input_modalities": "text,image,video",
+            "thinking": "adaptive",
+        },
+    ),
     "minimax-m3": ModelSpec(
         name="minimax-m3",
         family="minimax",
@@ -227,6 +240,7 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
             "context_window": "204800",
             "input_modalities": "text",
             "thinking": "always_on",
+            "legacy": "true",
         },
     ),
 }
@@ -245,4 +259,17 @@ def resolve_checkpoint(spec: ModelSpec, override: Optional[str] = None) -> str:
 
 
 def list_model_names() -> str:
-    return ", ".join(sorted(MODEL_REGISTRY))
+    """List current choices in registry order, retaining legacy IDs for lookup."""
+
+    return ", ".join(
+        name for name, spec in MODEL_REGISTRY.items()
+        if spec.extra.get("legacy") != "true"
+    )
+
+
+def validate_model_name(name: str) -> str:
+    """Accept explicit legacy selections without advertising them in the CLI."""
+
+    if name not in MODEL_REGISTRY:
+        raise ValueError(f"Unknown model {name!r}. Choose one of: {list_model_names()}")
+    return name

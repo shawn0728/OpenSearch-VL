@@ -16,11 +16,11 @@ Use Claude Opus 4.5 (no local GPUs needed; requires CLAUDE_API_* env vars)::
         --data-path /data/fvqa_test.parquet \
         --output-dir ./outputs/fvqa_test_claude
 
-Use MiniMax-M3 (no local GPUs needed; requires MINIMAX_API_KEY)::
+Use MiniMax-M3.1-Flash (no local GPUs needed; requires MINIMAX_API_KEY)::
 
-    python run_infer.py --model minimax-m3 \
+    python run_infer.py --model minimax-m3.1-flash \
         --data-path /data/fvqa_test.parquet \
-        --output-dir ./outputs/fvqa_test_minimax_m3
+        --output-dir ./outputs/fvqa_test_minimax_flash
 
 Switch to the MoE 30B-A3B variant::
 
@@ -59,7 +59,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=sorted(config.MODEL_REGISTRY.keys()),
+        type=config.validate_model_name,
+        metavar="{" + config.list_model_names().replace(", ", ",") + "}",
         default="8b",
         help="Model variant to run.",
     )
