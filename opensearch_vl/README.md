@@ -93,11 +93,23 @@ opensearch_vl/
        --data-path /data/fvqa_test.parquet \
        --output-dir ./outputs/fvqa_test_claude
 
-   # MiniMax-M3 via the Anthropic-compatible API (no GPUs needed)
-   python run_infer.py --model minimax-m3 \
+   # MiniMax-M3.1-Flash via the Anthropic-compatible API (no GPUs needed)
+   python run_infer.py --model minimax-m3.1-flash \
        --data-path /data/fvqa_test.parquet \
-       --output-dir ./outputs/fvqa_test_minimax_m3
+       --output-dir ./outputs/fvqa_test_minimax_flash
    ```
+
+   Current MiniMax choices are `minimax-m3.1-flash` (recommended first) and
+   `minimax-m3`. Explicit legacy `minimax-m2.7` selections remain accepted
+   without being advertised in CLI help; availability depends on the endpoint.
+   The global CLI default remains `8b`.
+
+   Flash uses a 1,000,000-token context and supports up to 524,288 output tokens;
+   `--max-tokens` retains its conservative 32,768 default. Requests use the
+   [API's default thinking settings](https://platform.minimax.io/docs/api-reference/text-anthropic-api.md):
+   Flash always thinks at `max` effort, while M3 thinking defaults to off.
+   Full MiniMax response blocks are retained for subsequent tool turns.
+   The agent continues to use its existing text-formatted tool protocol.
 
    `run_infer.sh` is a thin wrapper that sources environment variables
    such as `MODEL`, `DATA_PATH`, `OUTPUT_DIR`, `GPUS`, `LIMIT`, etc.

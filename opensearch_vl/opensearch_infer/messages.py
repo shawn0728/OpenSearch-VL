@@ -60,6 +60,8 @@ def to_minimax_messages(contents: Iterable[Dict[str, Any]]) -> List[Dict[str, An
     MiniMax exposes an Anthropic-compatible Messages API, so images are
     emitted as ``{"type": "image", "source": {...}}`` blocks with either a
     ``url`` or ``base64`` source, matching the Anthropic wire format.
+    ``minimax_block`` preserves native response blocks unchanged for replay,
+    including thinking signatures, and can carry native image/video inputs.
     """
 
     messages: List[Dict[str, Any]] = []
@@ -68,7 +70,9 @@ def to_minimax_messages(contents: Iterable[Dict[str, Any]]) -> List[Dict[str, An
         parts = item.get("parts", []) or []
         block: List[Dict[str, Any]] = []
         for part in parts:
-            if "image_url" in part:
+            if "minimax_block" in part:
+                block.append(part["minimax_block"])
+            elif "image_url" in part:
                 value = part["image_url"]
                 url = value.get("url", "") if isinstance(value, dict) else str(value)
                 if url:
