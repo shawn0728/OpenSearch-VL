@@ -9,6 +9,7 @@
 model_name_or_path: /root/models/Qwen3.5-4B
 image_max_pixels: 262144            # 512×512, as in the paper's SFT configs
 trust_remote_code: true
+enable_liger_kernel: true          # fused linear+CE: never materialises fp32 logits (vocab 248k × 26k tok = 24.7 GiB → OOM at step ~50)
 
 ### method
 stage: sft
@@ -33,8 +34,8 @@ dataloader_num_workers: 4
 ### output
 output_dir: /root/sft-runs/qwen3_5_4b_lora_sft_2048   # instance disk (autodl-fs netdisk is ~full)
 logging_steps: 5
-save_steps: 128                     # 4 checkpoints over 512 steps
-save_total_limit: 4
+save_steps: 64                      # 8 checkpoints over 512 steps (bounded loss on crash / hard power-off)
+save_total_limit: 8
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false

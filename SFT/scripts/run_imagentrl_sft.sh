@@ -14,6 +14,7 @@ export PATH="$SFT_ENV/bin:/root/miniconda3/bin:$PATH"
 export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
 export WANDB_PROJECT=${WANDB_PROJECT:-imagentrl-sft}
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 export FORCE_TORCHRUN=0
 : "${OUTPUT_ROOT:?OUTPUT_ROOT must be set (projtool run_script exports it)}"
 # Credentials (WANDB_API_KEY, …) live outside the synced workspace, mode 600.
