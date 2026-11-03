@@ -1,0 +1,56 @@
+# ImagentRL — agentic cold-start SFT, Qwen3.5-4B + LoRA, 1× RTX PRO 6000 (96 GB).
+#
+# User-specified: LoRA rank 32 · 2048 samples (≈60% retrieval / 30% crop+OCR /
+# 10% enhancement, selected by SFT/scripts/select_sft_subset.py) · lr 2e-5 ·
+# batch size 4 · 1 epoch · 512 optimizer updates (2048 / 4).
+# Everything else below is an agent default — see comments.
+
+### model
+model_name_or_path: /root/models/Qwen3.5-4B
+image_max_pixels: 262144            # 512×512, as in the paper's SFT configs
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64                      # 2× rank
+lora_dropout: 0.05
+lora_target: all                    # every linear layer of the LLM (incl. Gated-DeltaNet projections)
+freeze_vision_tower: true           # LoRA on the language model only
+freeze_multi_modal_projector: true
+
+### dataset  (dataset_dir + dataset_info.json are written by the selection run)
+dataset_dir: /root/datasets/sft_subset_2048
+dataset: imagentrl_sft_2048
+template: qwen3_5                   # trajectories contain <think> blocks → thinking template
+cutoff_len: 32000                   # selection already dropped samples > 0.97 × cutoff, so nothing is truncated
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /root/sft-runs/qwen3_5_4b_lora_sft_2048   # instance disk (autodl-fs netdisk is ~full)
+logging_steps: 5
+save_steps: 128                     # 4 checkpoints over 512 steps
+save_total_limit: 4
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: wandb
+run_name: qwen3_5_4b_lora_sft_2048
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4      # effective batch size 4 on 1 GPU
+num_train_epochs: 1.0
+learning_rate: 2.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.05                  # ≈26 warmup steps
+weight_decay: 0.0
+max_grad_norm: 1.0
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 600
+seed: 42

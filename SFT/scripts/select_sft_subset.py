@@ -345,6 +345,7 @@ def main() -> None:
     ap.add_argument("--eval", nargs="*", default=[], help="eval parquet files for overlap check")
     ap.add_argument("--model", required=True, help="tokenizer / processor path (Qwen3.5)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--dataset-name", default="imagentrl_sft_2048", help="key in the written dataset_info.json")
     ap.add_argument("--n", type=int, default=2048)
     ap.add_argument("--ratios", default="retrieval=0.6,crop_ocr=0.3,enhancement=0.1")
     ap.add_argument("--cutoff-len", type=int, default=32000)
@@ -537,6 +538,20 @@ def main() -> None:
         "overlap_examples": overlap_examples,
     }
     json.dump(report, open(out / "report.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    # LLaMA-Factory registry next to the data (dataset_dir = --out).
+    json.dump({args.dataset_name: {
+        "file_name": "sft_subset.json", "formatting": "sharegpt",
+        "columns": {"messages": "conversations", "images": "images", "system": "system", "tools": "tools"},
+        "tags": {"role_tag": "from", "content_tag": "value", "user_tag": "human",
+                 "assistant_tag": "gpt", "observation_tag": "observation"},
+    }}, open(out / "dataset_info.json", "w", encoding="utf-8"), indent=1)
+    if os.getenv("OUTPUT_ROOT"):  # projtool run dir → synced back to the local output/ mirror
+        import shutil
+        for name in ("report.json", "manifest.jsonl"):
+            shutil.copy(out / name, Path(os.environ["OUTPUT_ROOT"]) / f"selection_{name}")
+        json.dump({"selected_total": len(selected), **{f"selected_{c}": n for c, n in report["selected_by_category"].items()},
+                   **{f"pool_{c}": n for c, n in report["pool_sizes"].items()}},
+                  open(Path(os.environ["OUTPUT_ROOT"]) / "metrics.json", "w"))
     print(json.dumps({k: report[k] for k in ("rejections_total", "pool_sizes", "targets_after_redistribution",
                                              "selected_by_category", "selected_by_source",
                                              "selected_tool_calls_hist", "selected_samples_using_tool",
