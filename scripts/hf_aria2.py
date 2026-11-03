@@ -24,7 +24,9 @@ import urllib.request
 
 def list_files(endpoint: str, kind: str, repo: str, rev: str) -> list[dict]:
     api = f"{endpoint}/api/{kind}s/{repo}/tree/{rev}?recursive=true"
-    with urllib.request.urlopen(api, timeout=60) as r:
+    # hf-mirror.com answers 403 to urllib's default "Python-urllib/x.y" UA.
+    req = urllib.request.Request(api, headers={"User-Agent": "hf_aria2/0.1 (+aria2c)"})
+    with urllib.request.urlopen(req, timeout=60) as r:
         return [x for x in json.load(r) if x.get("type") == "file"]
 
 
