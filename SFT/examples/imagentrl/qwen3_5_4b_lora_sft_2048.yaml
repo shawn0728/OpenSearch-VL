@@ -1,7 +1,7 @@
 # ImagentRL — agentic cold-start SFT, Qwen3.5-4B + LoRA, 1× RTX PRO 6000 (96 GB).
 #
 # User-specified: LoRA rank 32 · 2048 samples (≈60% retrieval / 30% crop+OCR /
-# 10% enhancement, selected by SFT/scripts/select_sft_subset.py) · lr 2e-5 ·
+# 10% enhancement, selected by SFT/scripts/select_sft_subset.py) · lr 1e-4 ·
 # batch size 4 · 1 epoch · 512 optimizer updates (2048 / 4).
 # Everything else below is an agent default — see comments.
 
@@ -45,7 +45,7 @@ run_name: qwen3_5_4b_lora_sft_2048
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 4      # effective batch size 4 on 1 GPU
 num_train_epochs: 1.0
-learning_rate: 2.0e-5
+learning_rate: 1.0e-4                # user: 1e-4 (LoRA; 2e-5 is the paper's full-FT value)
 lr_scheduler_type: cosine
 warmup_ratio: 0.05                  # ≈26 warmup steps
 weight_decay: 0.0
