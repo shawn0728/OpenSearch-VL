@@ -16,6 +16,10 @@ export WANDB_PROJECT=${WANDB_PROJECT:-imagentrl-sft}
 export TOKENIZERS_PARALLELISM=false
 export FORCE_TORCHRUN=0
 : "${OUTPUT_ROOT:?OUTPUT_ROOT must be set (projtool run_script exports it)}"
+# Credentials (WANDB_API_KEY, …) live outside the synced workspace, mode 600.
+SECRETS=/root/.imagentrl-secrets.env
+if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; else echo "WARN: $SECRETS missing"; fi
+if [ -z "${WANDB_API_KEY:-}" ]; then echo "WARN: no WANDB_API_KEY -> wandb offline"; export WANDB_MODE=offline; fi
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 CFG_ABS=$(readlink -f "$CFG")
