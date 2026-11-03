@@ -9,11 +9,13 @@ All tools follow the async DeepResearchTool interface.
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
@@ -97,9 +99,27 @@ API_KEY = os.getenv("API_GATEWAY_KEY", "")
 
 SERP_SEARCH_URL = os.getenv("TEXT_SEARCH_URL", "https://google.serper.dev/search")
 
-# Judge / Extract model endpoint used for Qwen3-32B summarisation
-QWEN_API_BASE = os.getenv("QWEN_API_BASE", "")
+# ---------------------------------------------------------------------------
+# DeepSeek Search & Fetch (backs text_search / web_search)
+# Docs: https://api-docs.deepseek.com/guides/search/
+# ---------------------------------------------------------------------------
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_QUERY_MAX_CHARS = 128          # hard API limit on `query`
+DEEPSEEK_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+
+# Summariser endpoint (OpenAI-compatible; name kept from upstream Qwen3-32B setup)
+QWEN_API_BASE = os.getenv("QWEN_API_BASE", "").rstrip("/")
 QWEN_MODEL = os.getenv("QWEN_MODEL", "")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "")
+SUMMARY_CONTENT_MAX_CHARS = int(os.getenv("SUMMARY_CONTENT_MAX_CHARS", "6000"))
+# Extra provider-specific chat body, e.g. '{"thinking": {"type": "disabled"}}'
+# for DeepSeek, whose default thinking mode can spend max_tokens on reasoning.
+try:
+    LLM_EXTRA_BODY = json.loads(os.getenv("LLM_EXTRA_BODY_JSON", "") or "{}")
+except json.JSONDecodeError:
+    print("[visual_tools] WARNING: LLM_EXTRA_BODY_JSON is not valid JSON; ignored")
+    LLM_EXTRA_BODY = {}
 
 # ---------------------------------------------------------------------------
 # env.py lens_scan / web_search (Polaris)
@@ -177,7 +197,12 @@ def _upload_pil_to_cos(
 def _download_image_bytes(url: str, timeout: int = 60, retries: int = 3) -> Optional[bytes]:
     for attempt in range(retries):
         try:
-            resp = requests.get(url, timeout=(timeout, timeout), stream=True)
+            # Many image hosts (e.g. Wikimedia) reject the default python-requests UA.
+            resp = requests.get(
+                url, timeout=(timeout, timeout), stream=True,
+                headers={"User-Agent": os.getenv(
+                    "TOOL_HTTP_USER_AGENT", "Mozilla/5.0 (compatible; ImagentRL-tools/0.1)")},
+            )
             resp.raise_for_status()
             return resp.content
         except Exception:
@@ -387,6 +412,28 @@ def layout_parsing(
 # ImageEnhancementEngine (perspective_correct, super_resolution, sharpen)
 # ===================================================================
 
+SR_MODEL_PATH = os.getenv("SR_MODEL_PATH", "EDSR_x4.pb")
+SR_MAX_INPUT_EDGE = int(os.getenv("SR_MAX_INPUT_EDGE", "384"))
+_sr_local = threading.local()
+
+
+def _get_sr_model(model_path: str):
+    """Per-thread cached EDSR x4 net (cv2.dnn nets are not safe to share across threads)."""
+    cached = getattr(_sr_local, "models", None)
+    if cached is None:
+        cached = _sr_local.models = {}
+    if model_path not in cached:
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"EDSR weights not found at {model_path!r} (set SR_MODEL_PATH)"
+            )
+        sr = cv2.dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(model_path)
+        sr.setModel("edsr", 4)
+        cached[model_path] = sr
+    return cached[model_path]
+
+
 class ImageEnhancementEngine:
     """OpenCV-based image enhancement."""
 
@@ -442,18 +489,33 @@ class ImageEnhancementEngine:
         return self.current_image
 
     # -- super resolution --
-    def apply_super_resolution(self, model_path: str = "EDSR_x4.pb", scale: int = 4):
+    def apply_super_resolution(self, model_path: str = "", scale: int = 4):
+        """EDSR x4 on CPU. Raises on failure so callers never report a no-op as success.
+
+        Input is first downscaled to SR_MAX_INPUT_EDGE (CPU cost grows with
+        pixel count: ~4s for 256x256, ~17s for 512x512 on 24 cores). Only x4
+        weights are shipped, so scale 2/3 are produced by x4 + area downscale.
+        """
         if self.current_image is None:
             return None
-        if not os.path.exists(model_path):
-            return self.current_image
-        try:
-            sr = cv2.dnn_superres.DnnSuperResImpl_create()
-            sr.readModel(model_path)
-            sr.setModel("edsr", scale)
-            self.current_image = sr.upsample(self.current_image)
-        except Exception:
-            pass
+        if len(self.current_image.shape) == 2:
+            self.current_image = cv2.cvtColor(self.current_image, cv2.COLOR_GRAY2BGR)
+        elif self.current_image.shape[2] == 4:
+            self.current_image = cv2.cvtColor(self.current_image, cv2.COLOR_BGRA2BGR)
+        scale = scale if scale in (2, 3, 4) else 4
+        h, w = self.current_image.shape[:2]
+        if max(h, w) > SR_MAX_INPUT_EDGE:
+            f = SR_MAX_INPUT_EDGE / max(h, w)
+            self.current_image = cv2.resize(
+                self.current_image, (max(1, int(w * f)), max(1, int(h * f))),
+                interpolation=cv2.INTER_AREA,
+            )
+            h, w = self.current_image.shape[:2]
+        sr = _get_sr_model(model_path or SR_MODEL_PATH)
+        out = sr.upsample(self.current_image)
+        if scale != 4:
+            out = cv2.resize(out, (w * scale, h * scale), interpolation=cv2.INTER_AREA)
+        self.current_image = out
         return self.current_image
 
     # -- sharpen --
@@ -482,7 +544,7 @@ def _summarize_with_qwen(content: str, query: str, title: str) -> str:
         prompt = (
             f'Based on the following webpage content, provide a concise summary '
             f'relevant to the query: "{query}"\n\n'
-            f'Webpage Title: {title}\nContent:\n{content[:2000]}\n\n'
+            f'Webpage Title: {title}\nContent:\n{content[:SUMMARY_CONTENT_MAX_CHARS]}\n\n'
             f'Provide a focused summary (2-4 sentences) that directly addresses the query.'
         )
         payload = {
@@ -490,10 +552,14 @@ def _summarize_with_qwen(content: str, query: str, title: str) -> str:
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1024,
             "temperature": 0.3,
+            **LLM_EXTRA_BODY,
         }
+        headers = {"Content-Type": "application/json"}
+        if QWEN_API_KEY:
+            headers["Authorization"] = f"Bearer {QWEN_API_KEY}"
         resp = requests.post(
             f"{QWEN_API_BASE}/chat/completions",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             json=payload,
             timeout=60,
         )
@@ -623,8 +689,100 @@ class LayoutParsingTool(DeepResearchTool):
         return "\n".join(parts)
 
 
+# ===================================================================
+# DeepSeek Search / Fetch helpers
+# ===================================================================
+
+class _RetryableHTTPError(Exception):
+    """Raised for HTTP statuses DeepSeek documents as retryable (408/429/5xx)."""
+
+
+def _deepseek_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _deepseek_search(
+    query: str,
+    count: int,
+    need_content: bool,
+    proxies: Optional[dict],
+    executor=None,
+) -> Tuple[Optional[list], Optional[str]]:
+    """POST /v1/tools/search. Returns (results, error). Cached by request."""
+    if not DEEPSEEK_API_KEY:
+        return None, "DEEPSEEK_API_KEY is not set"
+    query = query.strip()[:DEEPSEEK_QUERY_MAX_CHARS]
+    count = max(1, min(int(count), 50))
+    payload = {"query": query, "count": count, "need_content": bool(need_content)}
+    cache_input = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    cache_key = get_cache_key("deepseek_search:" + cache_input)
+
+    cached = await get_cache_async("text_search", cache_key)
+    if cached:
+        try:
+            return json.loads(cached), None
+        except Exception:
+            pass
+
+    def _do():
+        resp = requests.post(
+            f"{DEEPSEEK_API_BASE}/v1/tools/search",
+            headers=_deepseek_headers(), json=payload, timeout=60, proxies=proxies,
+        )
+        if resp.status_code in DEEPSEEK_RETRY_STATUS:
+            raise _RetryableHTTPError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp
+
+    try:
+        resp = await run_with_retries_async(_do, attempts=5, delay=2, executor=executor)
+    except Exception as exc:
+        return None, f"DeepSeek search failed: {exc}"
+    if resp.status_code != 200:
+        return None, f"DeepSeek search error: HTTP {resp.status_code}: {resp.text[:200]}"
+    results = resp.json().get("results", []) or []
+    if results:
+        await set_cache_async(
+            "text_search", cache_key, cache_input, json.dumps(results, ensure_ascii=False)
+        )
+    return results, None
+
+
+async def _deepseek_fetch(url: str, proxies: Optional[dict], executor=None) -> str:
+    """POST /v1/tools/fetch. Returns page Markdown, or "" if unavailable."""
+    if not DEEPSEEK_API_KEY or not url.startswith(("http://", "https://")):
+        return ""
+    cache_key = get_cache_key("deepseek_fetch:" + url)
+    cached = await get_cache_async("text_visit", cache_key)
+    if cached:
+        return cached
+
+    def _do():
+        resp = requests.post(
+            f"{DEEPSEEK_API_BASE}/v1/tools/fetch",
+            headers=_deepseek_headers(), json={"url": url}, timeout=60, proxies=proxies,
+        )
+        if resp.status_code in DEEPSEEK_RETRY_STATUS:
+            raise _RetryableHTTPError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return resp
+
+    try:
+        resp = await run_with_retries_async(_do, attempts=3, delay=2, executor=executor)
+    except Exception:
+        return ""
+    # 403 (security policy) / 404 (no usable content) are permanent — don't retry.
+    if resp.status_code != 200:
+        return ""
+    content = (resp.json().get("content") or "").strip()
+    if content:
+        await set_cache_async("text_visit", cache_key, url, content)
+    return content
+
+
 class TextSearchTool(DeepResearchTool):
-    """Search web + JINA reader + Qwen summarisation (Serper → JINA → Qwen3-32B)."""
+    """DeepSeek Search → page content (search index, else DeepSeek Fetch) → LLM summary."""
 
     def __init__(self):
         super().__init__(
@@ -644,84 +802,51 @@ class TextSearchTool(DeepResearchTool):
 
     async def call(self, q: str = "", query: str = "", hl: str = "en",
                    top_k: int = 5, lang: str = "", **ctx) -> str:
+        # `hl` / `lang` are accepted for prompt compatibility; DeepSeek ranks
+        # by query language, so they are not forwarded.
         q = q or query
-        hl = hl or lang or "en"
         if not q:
             return "Error: 'q' or 'query' parameter is required"
+        try:
+            top_k = max(1, min(int(top_k), 10))
+        except (TypeError, ValueError):
+            top_k = 5
 
         proxies = self._get_requests_proxies()
-        use_gateway = bool(API_USER and API_KEY)
 
-        # Step 1 – Serper search
-        if use_gateway:
-            headers = {
-                "Authorization": f"Bearer {API_USER}:{API_KEY}?provider=serper&timeout=60",
-                "Content-Type": "application/json",
-            }
-            search_url = f"{API_HOST}/search"
-        else:
-            serp_key = os.getenv("SERP_API_KEY", "")
-            headers = {"X-API-KEY": serp_key, "Content-Type": "application/json"}
-            search_url = SERP_SEARCH_URL
+        # Step 1 – DeepSeek search, asking for indexed page content up front.
+        # (Fetch rejects some major sites, e.g. Wikipedia, while the search
+        # index still carries their text.)
+        results, err = await _deepseek_search(
+            q, count=top_k, need_content=True, proxies=proxies, executor=self.executor,
+        )
+        if err:
+            return f"Search error: {err}"
+        if not results:
+            return f"No results found for '{q}'"
 
-        payload = {"q": q, "location": "United States", "hl": hl, "num": min(top_k, 20)}
-
-        try:
-            def _do_search():
-                return requests.post(search_url, headers=headers, json=payload, timeout=60, proxies=proxies)
-
-            resp = await run_with_retries_async(_do_search, executor=self.executor)
-            if resp.status_code != 200:
-                return f"Serper error: HTTP {resp.status_code}: {resp.text[:200]}"
-            organic = resp.json().get("organic", [])
-            if not organic:
-                return f"No results found for '{q}'"
-        except Exception as exc:
-            return f"Search error: {exc}"
-
-        # Step 2 – JINA reader + Qwen summary
-        jina_headers = {}
-        if use_gateway:
-            jina_headers = {
-                "Authorization": f"Bearer {API_USER}:{API_KEY}?provider=jina_ai&timeout=60",
-                "Content-Type": "application/json",
-            }
-
-        formatted = []
-        for i, item in enumerate(organic[:top_k], 1):
-            url = item.get("link", "")
+        # Step 2 – fill missing content via DeepSeek Fetch, then summarise.
+        async def _one(i: int, item: dict) -> str:
+            url = item.get("url", "")
             title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            page_content = snippet
-
-            if url and jina_headers:
-                try:
-                    def _jina(u=url):
-                        return requests.post(
-                            f"{API_HOST}/images", headers=jina_headers,
-                            json={"url": u}, timeout=30, proxies=proxies,
-                        )
-
-                    jr = await run_with_retries_async(_jina, executor=self.executor)
-                    if jr.status_code == 200:
-                        jd = jr.json()
-                        if isinstance(jd, dict):
-                            c = jd.get("data", {}).get("content", "") or jd.get("content", "")
-                            if c:
-                                page_content = c
-                except Exception:
-                    pass
-
+            page_content = (item.get("content") or "").strip()
+            if not page_content and url:
+                page_content = await _deepseek_fetch(url, proxies, executor=self.executor)
+            if not page_content:
+                page_content = item.get("summary") or item.get("snippet") or ""
             summary = await asyncio.get_event_loop().run_in_executor(
                 None, _summarize_with_qwen, page_content, q, title,
             )
-            formatted.append(f"[Passage {i}]\nTitle: {title}\nURL: {url}\nSummary:\n{summary}")
+            return f"[Passage {i}]\nTitle: {title}\nURL: {url}\nSummary:\n{summary}"
 
-        return "\n\n".join(formatted)
+        passages = await asyncio.gather(
+            *(_one(i, it) for i, it in enumerate(results[:top_k], 1))
+        )
+        return "\n\n".join(passages)
 
 
 class WebSearchTool(DeepResearchTool):
-    """Simple Serper web search (returns snippets, no JINA/Qwen)."""
+    """DeepSeek web search (returns snippets only, no fetch / summary)."""
 
     def __init__(self):
         super().__init__(
@@ -742,38 +867,18 @@ class WebSearchTool(DeepResearchTool):
             return "Error: 'q' parameter is required"
 
         proxies = self._get_requests_proxies()
-        use_gateway = bool(API_USER and API_KEY)
-
-        if use_gateway:
-            headers = {
-                "Authorization": f"Bearer {API_USER}:{API_KEY}?provider=serper&timeout=60",
-                "Content-Type": "application/json",
-            }
-            url = f"{API_HOST}/search"
-        else:
-            serp_key = os.getenv("SERP_API_KEY", "")
-            headers = {"X-API-KEY": serp_key, "Content-Type": "application/json"}
-            url = SERP_SEARCH_URL
-
-        payload = {"q": q, "location": "United States", "hl": hl, "num": 10}
-
-        try:
-            def _do():
-                return requests.post(url, headers=headers, json=payload, timeout=60, proxies=proxies)
-
-            resp = await run_with_retries_async(_do, executor=self.executor)
-            if resp.status_code != 200:
-                return f"Search error: HTTP {resp.status_code}"
-            items = resp.json().get("organic", [])
-            if not items:
-                return f"No results for '{q}'"
-        except Exception as exc:
-            return f"Search error: {exc}"
+        items, err = await _deepseek_search(
+            q, count=10, need_content=False, proxies=proxies, executor=self.executor,
+        )
+        if err:
+            return f"Search error: {err}"
+        if not items:
+            return f"No results for '{q}'"
 
         snippets = []
         for idx, it in enumerate(items[:10], 1):
-            t = it.get("title", "Untitled")
-            link = it.get("link", "")
+            t = it.get("title") or "Untitled"
+            link = it.get("url", "")
             snip = it.get("snippet", "")
             entry = f"{idx}. [{t}]({link})"
             if snip:
@@ -782,8 +887,58 @@ class WebSearchTool(DeepResearchTool):
         return f"Search for '{q}' returned {len(snippets)} results:\n\n" + "\n\n".join(snippets)
 
 
+# ===================================================================
+# 豆包搜索 Global 版 — visual (image-to-image) search
+# Docs: https://docs.volcengine.com/docs/Networkedsearch/doubao-search-global-edition
+# ===================================================================
+
+DOUBAO_SEARCH_API_KEY = os.getenv("DOUBAO_SEARCH_API_KEY", "")
+DOUBAO_SEARCH_URL = os.getenv(
+    "DOUBAO_SEARCH_URL", "https://open.feedcoopapi.com/search_api/global_search"
+)
+IMAGE_SEARCH_MAX_EDGE = int(os.getenv("IMAGE_SEARCH_MAX_EDGE", "1024"))
+IMAGE_SEARCH_DOC_COUNT = int(os.getenv("IMAGE_SEARCH_DOC_COUNT", "10"))
+# Result.ErrorCode values the docs mark as retryable (rate limit / internal).
+_DOUBAO_RETRY_CODES = {700429, 10500, 10501}
+
+
+def _encode_image_for_search(local_path: str) -> Optional[bytes]:
+    """Load, downscale (long edge ≤ IMAGE_SEARCH_MAX_EDGE) and JPEG-encode."""
+    try:
+        img = Image.open(local_path).convert("RGB")
+        if max(img.size) > IMAGE_SEARCH_MAX_EDGE:
+            img.thumbnail((IMAGE_SEARCH_MAX_EDGE, IMAGE_SEARCH_MAX_EDGE), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception as exc:
+        print(f"[visual_tools] _encode_image_for_search failed: {exc}")
+        return None
+
+
+def _format_visual_results(docs: list) -> str:
+    lines = []
+    for i, doc in enumerate(docs, 1):
+        title = (doc.get("Title") or "Untitled").strip()
+        url = doc.get("Url", "")
+        host = (doc.get("HostInfo") or {}).get("Hostname") or ""
+        texts = [
+            s.get("Text", "").strip()
+            for s in (doc.get("Snippet") or [])
+            if isinstance(s, dict) and s.get("Type") == "text" and s.get("Text", "").strip()
+        ]
+        entry = f"{i}. {title}" + (f" ({host})" if host else "") + f"\n   URL: {url}"
+        if texts:
+            entry += "\n   " + " ".join(texts)[:300]
+        lines.append(entry)
+    return (
+        f"Visual search found {len(docs)} visually similar web results "
+        f"(titles indicate what the image likely shows):\n\n" + "\n\n".join(lines)
+    )
+
+
 class ImageSearchTool(DeepResearchTool):
-    """Visual search via Polaris Lens API."""
+    """Reverse image search via 豆包搜索 Global 版 (SearchType=visual, base64 upload)."""
 
     def __init__(self):
         super().__init__(
@@ -804,29 +959,78 @@ class ImageSearchTool(DeepResearchTool):
 
         if not url:
             return "Error: 'url' parameter is required"
+        if not DOUBAO_SEARCH_API_KEY:
+            return "image_search error: DOUBAO_SEARCH_API_KEY is not set"
 
-        image_url = _ensure_image_url(url, image_paths, intermediate_dir, "image_search")
-        if not image_url:
-            avail = list(image_paths.keys())
+        # Resolve to a local file. A raw URL that is not a known ref is
+        # registered under itself so _resolve_image_ref downloads it.
+        ref = url
+        if ref not in image_paths and ref.startswith(("http://", "https://")):
+            image_paths = dict(image_paths)
+            image_paths[ref] = ref
+        local = _resolve_image_ref(ref, image_paths, intermediate_dir, "image_search")
+        if not local:
             return (
-                f"Error: Cannot resolve '{url}' to a public URL for image_search. "
-                f"COS upload available: {UPLOAD_AVAILABLE}. "
-                f"Known image refs: {avail}"
+                f"Error: Cannot load image '{url}' for image_search. "
+                f"Known image refs: {list(ctx.get('image_paths', {}).keys())}"
             )
 
-        if _env_lens_scan is None:
-            return "Error: lens_scan (env module) is not available"
+        img_bytes = await asyncio.get_event_loop().run_in_executor(
+            None, _encode_image_for_search, local
+        )
+        if not img_bytes:
+            return f"Error: Failed to decode image '{url}'"
+
+        cache_key = hashlib.sha256(b"doubao_visual:" + img_bytes).hexdigest()
+        cached = await get_cache_async("image_search", cache_key)
+        if cached:
+            return cached
+
+        payload = {
+            "SearchType": "visual",
+            "ImageQuery": {"ImageBase64": base64.b64encode(img_bytes).decode("ascii")},
+            "DocCount": max(1, min(IMAGE_SEARCH_DOC_COUNT, 20)),
+            # Queue server-side instead of failing fast when over the QPS limit.
+            "EnableWaiting": True,
+            "MaxWaitTime": 10000,
+        }
+        headers = {
+            "Authorization": f"Bearer {DOUBAO_SEARCH_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        proxies = self._get_requests_proxies()
+
+        def _do():
+            resp = requests.post(
+                DOUBAO_SEARCH_URL, headers=headers, json=payload, timeout=60, proxies=proxies,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise _RetryableHTTPError(f"HTTP {resp.status_code}")
+            data = resp.json()
+            code = (data.get("Result") or {}).get("ErrorCode")
+            if code in _DOUBAO_RETRY_CODES:
+                raise _RetryableHTTPError(f"ErrorCode {code}")
+            return resp.status_code, data
 
         try:
-            def _do_lens():
-                return _env_lens_scan(image_url=image_url)
-
-            result = await asyncio.get_event_loop().run_in_executor(None, _do_lens)
-            if isinstance(result, dict) and "error" in result:
-                return f"image_search error: {result['error']}"
-            return f"Tool execution result:\n{json.dumps(result, ensure_ascii=False, indent=2)}"
+            status, data = await run_with_retries_async(_do, attempts=4, delay=2, executor=self.executor)
         except Exception as exc:
-            return f"image_search error: {exc}"
+            return f"image_search error: visual search service unavailable ({exc})"
+
+        result = data.get("Result") or {}
+        err = (data.get("ResponseMetadata") or {}).get("Error")
+        # Report only the code: provider ErrorMsg text can contain agent-directed
+        # instructions that should not leak into the policy's observation.
+        if status != 200 or err or result.get("ErrorCode"):
+            code = result.get("ErrorCode") or (err or {}).get("Code") or status
+            return f"image_search error: visual search failed (code {code})"
+
+        docs = result.get("Documents") or []
+        if not docs:
+            return "image_search: no visually similar results found."
+        out = _format_visual_results(docs)
+        await set_cache_async("image_search", cache_key, f"sha256-jpeg:{len(img_bytes)}", out)
+        return out
 
 
 class PerspectiveCorrectTool(DeepResearchTool):
@@ -911,10 +1115,14 @@ class SuperResolutionTool(DeepResearchTool):
             return f"Error: Failed to resolve image for {image}"
 
         try:
-            eng = ImageEnhancementEngine()
-            eng.load_from_path(local)
-            eng.apply_super_resolution(scale=scale)
-            pil = eng.to_pil()
+            def _run_sr():
+                eng = ImageEnhancementEngine()
+                eng.load_from_path(local)
+                eng.apply_super_resolution(scale=int(scale or 4))
+                return eng.to_pil()
+
+            # CPU-bound for seconds: keep it off the event loop.
+            pil = await asyncio.get_event_loop().run_in_executor(self.executor, _run_sr)
             if not pil:
                 return "Error: super resolution failed"
 
@@ -929,7 +1137,7 @@ class SuperResolutionTool(DeepResearchTool):
             image_paths[new_id] = save
             return f"Super resolution done. New image ID: {new_id}. Saved to: {save}"
         except Exception as exc:
-            return f"Error: {exc}"
+            return f"Error: super resolution failed: {exc}"
 
 
 class SharpenTool(DeepResearchTool):

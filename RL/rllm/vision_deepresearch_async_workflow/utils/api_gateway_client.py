@@ -28,6 +28,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,12 @@ except ImportError:
 _BASE_URL = os.getenv("JUDGE_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 _API_KEY = os.getenv("JUDGE_API_KEY", "")
 _DEFAULT_MODEL = os.getenv("JUDGE_MODEL", "gpt-4o-mini")
+# Extra provider-specific body, e.g. '{"thinking": {"type": "disabled"}}' for
+# DeepSeek (its default thinking mode can exhaust max_tokens before answering).
+try:
+    _EXTRA_BODY: dict[str, Any] = json.loads(os.getenv("LLM_EXTRA_BODY_JSON", "") or "{}")
+except json.JSONDecodeError:
+    _EXTRA_BODY = {}
 
 
 def is_api_gateway_configured() -> bool:
@@ -93,6 +100,7 @@ def api_gateway_chat(
         "model": model,
         "messages": messages,
         "stream": False,
+        **_EXTRA_BODY,
     }
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
