@@ -20,6 +20,9 @@ export FORCE_TORCHRUN=0
 SECRETS=/root/.imagentrl-secrets.env
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; else echo "WARN: $SECRETS missing"; fi
 if [ -z "${WANDB_API_KEY:-}" ]; then echo "WARN: no WANDB_API_KEY -> wandb offline"; export WANDB_MODE=offline; fi
+# wandb's default dir is the cwd (/workspace/SFT) — a mutagen mirror that deletes
+# remote-only files. Keep wandb runs (incl. offline ones for later `wandb sync`) in the run dir.
+export WANDB_DIR=${WANDB_DIR:-$OUTPUT_ROOT}
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 CFG_ABS=$(readlink -f "$CFG")

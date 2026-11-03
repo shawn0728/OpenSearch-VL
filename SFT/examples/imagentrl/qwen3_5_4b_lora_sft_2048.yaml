@@ -26,7 +26,7 @@ dataset_dir: /root/datasets/sft_subset_2048
 dataset: imagentrl_sft_2048
 template: qwen3_5                   # trajectories contain <think> blocks → thinking template
 cutoff_len: 32000                   # selection already dropped samples > 0.97 × cutoff, so nothing is truncated
-overwrite_cache: true
+overwrite_cache: false               # reuse the HF datasets map cache (preprocessing 2048 samples ≈ 25 min)
 preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
@@ -38,7 +38,7 @@ save_total_limit: 4
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
-report_to: wandb
+report_to: wandb                    # api.wandb.ai is 403 from AutoDL westd → launcher runs WANDB_MODE=offline; `wandb sync` later
 run_name: qwen3_5_4b_lora_sft_2048
 
 ### train
