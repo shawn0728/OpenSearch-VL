@@ -12,6 +12,8 @@ Usage:
       --exclude '_plan_mode' --include-glob '*'
   aria2c -i /tmp/dl.txt -x 8 -s 8 -j 4 -c
 """
+from __future__ import annotations  # base conda on AutoDL images is Python 3.8
+
 import argparse
 import fnmatch
 import json
