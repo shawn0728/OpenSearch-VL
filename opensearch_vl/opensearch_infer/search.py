@@ -487,6 +487,16 @@ def _text_search_deepseek(query: str, top_k: int) -> str:
 _DOUBAO_RETRY_CODES = {700429, 10500, 10501}
 
 
+def _doubao_transient(code: object) -> bool:
+    """Rate limits and server-side failures, including ErrorCode 500 in an HTTP 200 body."""
+    if code in _DOUBAO_RETRY_CODES:
+        return True
+    try:
+        return 500 <= int(code) < 600
+    except (TypeError, ValueError):
+        return False
+
+
 def _encode_for_visual_search(image_bytes: bytes) -> bytes:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     edge = config.IMAGE_SEARCH_MAX_EDGE
@@ -543,7 +553,7 @@ def image_search_bytes(image_bytes: bytes, attempts: int = 4) -> str:
                     summary, ensure_ascii=False, indent=2
                 )
             code = code or response.status_code
-            if code not in _DOUBAO_RETRY_CODES and response.status_code < 500:
+            if not _doubao_transient(code) and response.status_code < 500:
                 if code not in _DOUBAO_BAD_INPUT:
                     raise FatalServiceError(f"Doubao search: code {code}")
                 break
