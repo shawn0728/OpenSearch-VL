@@ -5,5 +5,6 @@ set -euo pipefail
 export PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/root/autodl-fs/models/paddlex}
 export PADDLE_PDX_MODEL_SOURCE=${PADDLE_PDX_MODEL_SOURCE:-modelscope}
 export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
-exec /root/venvs/ocr/bin/paddlex --serve --pipeline PaddleOCR-VL --engine transformers \
+# "PaddleOCR-VL" alone is the v1 pipeline (PP-DocLayoutV2, unknown to transformers 5.2).
+exec /root/venvs/ocr/bin/paddlex --serve --pipeline PaddleOCR-VL-1.6 --engine transformers \
   --device gpu:0 --host 127.0.0.1 --port 8080
