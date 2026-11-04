@@ -3,11 +3,11 @@
 #
 #   bash opensearch_vl/run_sft_eval.sh <cases.parquet> <work_dir> <shards_per_model> [tags]
 #
-# tags defaults to "base sft". Trajectories and tool images go to <work_dir> on the
+# tags defaults to "base base_clean sft". Trajectories and tool images go to <work_dir> on the
 # instance disk (mutagen would otherwise mirror every intermediate PNG); results and
 # trajectory JSONs are copied to $OUTPUT_ROOT. Finished cases are skipped on re-run.
 set -uo pipefail
-CASES=${1:?cases parquet}; WORK=${2:?work dir}; SHARDS=${3:-2}; TAGS=${4:-base sft}
+CASES=${1:?cases parquet}; WORK=${2:?work dir}; SHARDS=${3:-2}; TAGS=${4:-base base_clean sft}
 HERE=$(cd "$(dirname "$0")" && pwd)
 SFT_ENV=/root/miniconda3/envs/sft
 OCR_ENV=/root/venvs/ocr
@@ -40,7 +40,11 @@ echo "[$(date +%T)] OCR service ready"
 # ── inference: all tags in parallel, shards share the GPU ────────────────
 pids=()
 for tag in $TAGS; do
-  extra=(); [ "$tag" = sft ] && extra=(--adapter "$ADAPTER")
+  extra=()
+  case "$tag" in
+    sft) extra=(--adapter "$ADAPTER");;
+    base_clean) extra=(--tool-prompt json);;  # no JSON/XML conflict in the prompt
+  esac
   mkdir -p "$WORK/$tag"
   for i in $(seq 0 $((SHARDS - 1))); do
     python "$HERE/run_infer.py" --model qwen3.5-4b --gpus 0 --dataset test \
@@ -83,7 +87,8 @@ for tag in $TAGS; do
     2>&1 | grep -vE "it/s|s/it" | tail -6
   runs+=(--run "$tag=$WORK/$tag")
 done
-baseline=(); case " $TAGS " in *" base "*) baseline=(--baseline base);; esac
+baseline=()
+for b in base base_clean; do case " $TAGS " in *" $b "*) baseline+=(--baseline "$b");; esac; done
 python "$HERE/summarize_sft_eval.py" "${runs[@]}" "${baseline[@]}" --out "$OUTPUT_ROOT/summary"
 
 for tag in $TAGS; do

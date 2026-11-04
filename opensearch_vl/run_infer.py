@@ -81,6 +81,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="LoRA adapter directory merged into the base model (qwen3.5 only).",
     )
     parser.add_argument(
+        "--tool-prompt",
+        type=str,
+        default="xml",
+        choices=["xml", "json"],
+        help="qwen3.5 only: xml = template's instructions as in training; json = no conflict with the system text.",
+    )
+    parser.add_argument(
         "--shard",
         type=str,
         default="0/1",
@@ -202,6 +209,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         gpus=args.gpus,
         dtype=args.dtype,
         adapter=args.adapter,
+        tool_prompt=args.tool_prompt,
     )
     logger.info("Model: %s", runner.display_name)
 

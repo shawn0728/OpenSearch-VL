@@ -44,14 +44,19 @@ def load_run(path: Path) -> dict[str, dict]:
         t = json.load(open(f, encoding="utf-8"))
         cid = t["case_id"]
         turns = t.get("turns", [])
-        tools, errors, xml = [], 0, 0
+        tools, errors, xml, json_calls, unparsed = [], 0, 0, 0, 0
         for turn in turns:
             if turn.get("tool_call"):
                 tools.append(json.loads(turn["tool_call"]).get("name", "?"))
             if "Tool execution error" in (turn.get("tool_output") or ""):
                 errors += 1
-            if "<function=" in (turn.get("response_text") or ""):
+            text = turn.get("response_text") or ""
+            if "<function=" in text:
                 xml += 1
+            elif "<tool_call>" in text:
+                json_calls += 1
+            if ("<function=" in text or "<tool_call>" in text) and not turn.get("tool_call"):
+                unparsed += 1  # malformed call that could not be executed
         j = judged.get(cid)
         cases[cid] = {
             "bench": t.get("category", cid.split("__")[0]),
@@ -60,6 +65,8 @@ def load_run(path: Path) -> dict[str, dict]:
             "tools": tools,
             "tool_errors": errors,
             "xml_calls": xml,
+            "json_calls": json_calls,
+            "unparsed_calls": unparsed,
             "turns": len(turns),
         }
     return cases
@@ -82,6 +89,8 @@ def metrics(cases: list[dict]) -> dict:
         "cases_with_no_tool": sum(not c["tools"] for c in cases) / max(1, len(cases)),
         "tool_error_rate": sum(c["tool_errors"] for c in cases) / max(1, calls),
         "xml_format_calls": sum(c["xml_calls"] for c in cases),
+        "json_format_calls": sum(c["json_calls"] for c in cases),
+        "unparsed_calls": sum(c["unparsed_calls"] for c in cases),
         "tool_usage": dict(collections.Counter(t for c in cases for t in c["tools"]).most_common()),
     }
 
@@ -89,7 +98,7 @@ def metrics(cases: list[dict]) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", action="append", required=True, help="tag=dir")
-    ap.add_argument("--baseline", default=None)
+    ap.add_argument("--baseline", action="append", default=[])
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -102,8 +111,7 @@ def main() -> None:
             b: metrics([c for c in cases.values() if c["bench"] == b]) for b in benches
         }
 
-    base = args.baseline
-    if base:
+    for base in args.baseline:
         for tag, cases in runs.items():
             if tag == base:
                 continue
@@ -128,14 +136,15 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     json.dump(report, open(out / "summary.json", "w"), ensure_ascii=False, indent=1)
 
-    lines = ["| run | bench | n | acc | 95% CI | finished | tools/case | no-tool | tool err |", "|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| run | bench | n | acc | 95% CI | finished | tools/case | no-tool | tool err | json/xml/unparsed |", "|---|---|---|---|---|---|---|---|---|---|"]
     for tag in runs:
         rows = [("ALL", report["overall"][tag])] + list(report["by_bench"][tag].items())
         for b, m in rows:
             lines.append(
                 f"| {tag} | {b} | {m['judged']} | {m['acc']:.1%} | {m['ci95'][0]:.1%}–{m['ci95'][1]:.1%} "
                 f"| {m['finished_with_response']:.0%} | {m['tool_calls_per_case']:.1f} "
-                f"| {m['cases_with_no_tool']:.0%} | {m['tool_error_rate']:.0%} |"
+                f"| {m['cases_with_no_tool']:.0%} | {m['tool_error_rate']:.0%} "
+                f"| {m['json_format_calls']}/{m['xml_format_calls']}/{m['unparsed_calls']} |"
             )
     text = "\n".join(lines) + "\n\n" + json.dumps(report["paired"], indent=1) + "\n"
     (out / "summary.md").write_text(text, encoding="utf-8")

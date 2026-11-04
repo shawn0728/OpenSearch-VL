@@ -23,6 +23,7 @@ agnostic to the underlying provider. The minimal contract is::
 
 from __future__ import annotations
 
+import copy
 import json
 import base64
 import io
@@ -750,8 +751,12 @@ class Qwen35SFTRunner(BaseRunner):
         dtype: str = "bfloat16",
         image_max_pixels: int = 262144,
         max_prompt_tokens: int = 32000,
+        tool_prompt: str = "xml",
     ) -> None:
         super().__init__(spec)
+        # "xml": the qwen3_5 template's instructions, as in SFT training (they
+        # contradict the JSON format in the system text). "json": no contradiction.
+        self.tool_prompt = tool_prompt
         self.checkpoint = checkpoint
         self.adapter = adapter
         self.gpus = gpus
@@ -768,7 +773,8 @@ class Qwen35SFTRunner(BaseRunner):
     @property
     def display_name(self) -> str:
         suffix = " + SFT LoRA" if self.adapter else ""
-        return f"{self.spec.display_name}{suffix}"
+        clean = " (JSON tool prompt)" if self.tool_prompt == "json" else ""
+        return f"{self.spec.display_name}{suffix}{clean}"
 
     def load_prompt_stack(self) -> None:
         """Load tokenizer/processor/template only (no weights)."""
@@ -784,6 +790,11 @@ class Qwen35SFTRunner(BaseRunner):
         self._processor.image_min_pixels = 32 * 32
         self._processor.image_do_pad = False
         self._template = TEMPLATES["qwen3_5"]
+        if self.tool_prompt == "json":
+            from llamafactory.data.formatter import ToolFormatter  # type: ignore
+
+            self._template = copy.deepcopy(self._template)
+            self._template.format_tools = ToolFormatter(tool_format="qwen")
         with open(SFT_PROMPT_PATH, encoding="utf-8") as fh:
             prompt = json.load(fh)
         self._system = prompt["system"]
@@ -950,6 +961,7 @@ def build_runner(
     gpus: str = "0",
     dtype: str = "bfloat16",
     adapter: Optional[str] = None,
+    tool_prompt: str = "xml",
 ) -> BaseRunner:
     if model_name not in config.MODEL_REGISTRY:
         raise KeyError(
@@ -967,6 +979,7 @@ def build_runner(
             adapter=adapter,
             gpus=gpus,
             dtype=dtype,
+            tool_prompt=tool_prompt,
         )
     return Qwen3VLRunner(
         spec,

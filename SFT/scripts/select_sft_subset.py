@@ -346,6 +346,8 @@ def main() -> None:
     ap.add_argument("--model", required=True, help="tokenizer / processor path (Qwen3.5)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dataset-name", default="imagentrl_sft_2048", help="key in the written dataset_info.json")
+    ap.add_argument("--exclude-manifest", default=None,
+                    help="manifest.jsonl of a subset to hold out from: its samples and overlaps are removed")
     ap.add_argument("--n", type=int, default=2048)
     ap.add_argument("--ratios", default="retrieval=0.6,crop_ocr=0.3,enhancement=0.1")
     ap.add_argument("--cutoff-len", type=int, default=32000)
@@ -419,6 +421,26 @@ def main() -> None:
     records = kept
     print(f"[images] {len(records)} passed image checks", flush=True)
 
+    # Held-out selection: drop the given subset, and later anything sharing a
+    # question or primary image with it (handled like a test set below).
+    train_items = []
+    if args.exclude_manifest:
+        with open(args.exclude_manifest, encoding="utf-8") as fh:
+            excluded = {json.loads(line)["id"] for line in fh}
+        kept = []
+        for r in records:
+            if r["id"] not in excluded:
+                kept.append(r)
+                continue
+            q = norm_text(r["sample"]["conversations"][0]["value"])
+            train_items.append({"bench": "exclude_manifest", "id": r["id"], "qnorm": q,
+                                "phashes": [] if r["phash"] is None else [r["phash"]], "q": q[:200]})
+            reasons["excluded:manifest"] += 1
+        assert len(train_items) == len(excluded), (
+            f"only {len(train_items)}/{len(excluded)} excluded samples found; their overlap check would be incomplete")
+        records = kept
+        print(f"[exclude] {len(train_items)} removed, {len(records)} remain", flush=True)
+
     # 3. length
     limit = int(args.cutoff_len * args.length_margin)
     sys_cache = {}
@@ -450,9 +472,10 @@ def main() -> None:
     # 4. test-set overlap
     overlap_examples = []
     eval_counts = {}
-    if args.eval:
+    if args.eval or train_items:
         items, eval_counts = load_eval(args.eval)
         print(f"[eval] {len(items)} eval items from {eval_counts}", flush=True)
+        items += train_items
         idx = OverlapIndex(items, args.jaccard, args.min_words, args.max_ham)
         kept = []
         for r in records:

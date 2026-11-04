@@ -111,6 +111,16 @@ def main() -> int:
             assert (ours["pixel_values"] - theirs["pixel_values"]).abs().max() < 1e-4, "pixels differ"
             grids += len(images)
 
+    # The clean baseline differs only in the appended tool instructions.
+    clean = Qwen35SFTRunner(config.MODEL_REGISTRY["qwen3.5-4b"], args.model, tool_prompt="json")
+    clean.load_prompt_stack()
+    msgs = [{"role": "user", "content": "hello"}]
+    xml_text = tokenizer.decode(runner.build_prompt_ids(msgs, []))
+    json_text = tokenizer.decode(clean.build_prompt_ids(msgs, []))
+    assert "<function=" in xml_text and "<function=" not in json_text, "clean prompt still has XML"
+    assert "<|im_start|>user\nhello" in json_text and runner._system[:200] in json_text
+    assert runner._template.format_tools is not clean._template.format_tools
+
     print(f"OK: {len(picked)} trajectories, {checked_turns} assistant turns, {grids} images match training")
     return 0
 
