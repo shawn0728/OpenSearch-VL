@@ -261,6 +261,24 @@ def _normalize_search_aliases(name: str, params: dict) -> dict:
     return params
 
 
+_XML_FUNCTION_RE = re.compile(r"<function=([\w.\-]+)>(.*?)</function>", re.DOTALL)
+_XML_PARAMETER_RE = re.compile(r"<parameter=([\w.\-]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+
+
+def _parse_xml_tool_call(text: str) -> Optional[dict]:
+    """Parse the ``<function=..><parameter=..>`` format the Qwen3.5 template asks for."""
+    match = _XML_FUNCTION_RE.search(text)
+    if not match:
+        return None
+    params: dict = {}
+    for key, raw in _XML_PARAMETER_RE.findall(match.group(2)):
+        try:
+            params[key] = json.loads(raw)  # numbers / booleans
+        except ValueError:
+            params[key] = raw
+    return {"name": match.group(1), "parameters": params}
+
+
 def extract_tool_call(text: str) -> Optional[str]:
     """Pull the next tool invocation out of an agent message.
 
@@ -281,6 +299,13 @@ def extract_tool_call(text: str) -> Optional[str]:
                 )
         except Exception:
             pass
+
+    xml_call = _parse_xml_tool_call(text)
+    if xml_call:
+        xml_call["parameters"] = _normalize_search_aliases(
+            xml_call["name"], xml_call["parameters"]
+        )
+        return json.dumps(xml_call, ensure_ascii=False)
 
     for pattern, canonical in _FALLBACK_TAGS.values():
         m = pattern.search(text)
@@ -382,6 +407,19 @@ def _resolve_image_for_search(
     return None, "image_search requires either a 'url' or an image reference."
 
 
+def _load_image_bytes(ref: str, image_paths_dict: dict) -> Optional[bytes]:
+    """Raw bytes for an image reference (img_n) or a direct URL."""
+    data = image_paths_dict.get(ref, ref)
+    if isinstance(data, bytes):
+        return data
+    if isinstance(data, str) and data.startswith(("http://", "https://")):
+        return image_io.download_image_bytes(data)
+    if isinstance(data, str) and len(data) < 500 and os.path.exists(data):
+        with open(data, "rb") as fh:
+            return fh.read()
+    return None
+
+
 def _apply_image_op(
     operation: Callable[[ImageEnhancementEngine], object],
     image_data,
@@ -455,6 +493,21 @@ def execute_tool(
             top_k=int(params.get("top_k", 5)),
         ), {}
 
+    if name in {"image_search", "local_image_search", "lens_scan"} and (
+        search.visual_backend_enabled()
+    ):
+        ref = params.get("url", "") or params.get("image", "")
+        if not ref:
+            return "Tool execution error:\nimage_search requires 'url'.", {}
+        payload = _load_image_bytes(ref, image_paths_dict)
+        if payload is None:
+            return (
+                f"Tool execution error:\nCannot load image {ref!r}. "
+                f"Available: {list(image_paths_dict.keys())}",
+                {},
+            )
+        return search.image_search_bytes(payload), {}
+
     if name in {"image_search", "local_image_search", "lens_scan"}:
         url, err = _resolve_image_for_search(
             image_paths_dict,
@@ -506,7 +559,7 @@ def execute_tool(
         )
         msg = (
             f"Image cropped successfully. New image ID: {new_id}. "
-            f"Available at: {location}"
+            f"The cropped image has been uploaded to: {location}"
         )
         return msg, {new_id: location}
 
@@ -551,14 +604,29 @@ def execute_tool(
         )
         if result.get("error"):
             return f"Tool execution error:\n{result['error']}", {}
-        body = result.get("formatted_text", "") or "(no text detected)"
-        report = (
-            "Tool execution result:\n"
-            "Layout Parsing SUCCESS.\n\n"
-            "ALL RECOGNIZED TEXT:\n"
-            f"{body}"
+        # Wording matches the observations in the SFT training data.
+        rec_texts = result.get("rec_texts", [])
+        rule = "=" * 60
+        if not rec_texts:
+            return (
+                "⚠️ Layout Parsing WARNING: No text blocks detected.\n\n"
+                f"{rule}\n⚠️ WARNING: No text was recognized.\n{rule}\n"
+                "The image may not contain readable text, or the document "
+                "structure may not be recognized.",
+                {},
+            )
+        blocks = "\n\n".join(
+            f'[Text Block {i}]\n  Content: "{text}"'
+            for i, text in enumerate(rec_texts, 1)
         )
-        return report, {}
+        return (
+            "✅ Layout Parsing SUCCESS: Text detected successfully!\n"
+            f"Total text blocks detected: {len(rec_texts)}\n\n{blocks}\n\n"
+            f"{rule}\nALL RECOGNIZED TEXT:\n{result.get('formatted_text', '')}\n{rule}\n\n"
+            "⚠️ IMPORTANT: The text above is what Layout Parsing detected. "
+            "Use it as ground truth.",
+            {},
+        )
 
     if name in {"perspective_correct", "super_resolution", "sharpen"}:
         image_ref = params.get("image", "")
@@ -606,8 +674,14 @@ def execute_tool(
             name,
             image_paths_dict,
         )
+        done, noun = {
+            "perspective_correct": ("Perspective correction", "corrected"),
+            "super_resolution": ("Super resolution enhancement", "enhanced"),
+            "sharpen": ("Image sharpening", "sharpened"),
+        }[name]
         msg = (
-            f"{name} succeeded. New image ID: {new_id}. Available at: {location}"
+            f"{done} completed successfully. New image ID: {new_id}. "
+            f"The {noun} image has been uploaded to: {location}"
         )
         return msg, {new_id: location}
 

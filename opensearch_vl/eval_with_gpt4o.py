@@ -26,6 +26,9 @@ BASE_URL = os.environ.get("JUDGE_API_BASE_URL", "")
 APP_ID = os.environ.get("JUDGE_APP_ID", "")
 APP_KEY = os.environ.get("JUDGE_APP_KEY", "")
 MODEL_MARKER = os.environ.get("JUDGE_MODEL_MARKER", "api_openai_gpt-4o")
+# Set JUDGE_API_KEY to use a plain OpenAI-compatible endpoint at JUDGE_API_BASE_URL.
+JUDGE_API_KEY = os.environ.get("JUDGE_API_KEY", "")
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "gpt-4o")
 
 
 # ======================== Judge Prompts ========================
@@ -60,7 +63,35 @@ def get_simple_auth(source: str, secret_id: str, secret_key: str):
     return auth + sign + '"', date_time
 
 
+def _call_openai_compatible(prompt: str, max_retries: int, timeout: int) -> str:
+    """Judge via a plain OpenAI-compatible endpoint (JUDGE_API_KEY set)."""
+    body = {
+        "model": JUDGE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 1024,
+        **json.loads(os.environ.get("LLM_EXTRA_BODY_JSON", "") or "{}"),
+    }
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(
+                f"{BASE_URL.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {JUDGE_API_KEY}"},
+                json=body,
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"].get("content") or ""
+            print(f"  [Retry {attempt+1}] HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"  [Retry {attempt+1}] Error: {e}")
+        time.sleep(2 ** attempt)
+    return ""
+
+
 def call_gpt4o(prompt: str, max_retries: int = 5, timeout: int = 120) -> str:
+    if BASE_URL and JUDGE_API_KEY:
+        return _call_openai_compatible(prompt, max_retries, timeout)
     if not (BASE_URL and APP_ID and APP_KEY):
         raise RuntimeError(
             "Judge API is not configured. Please set JUDGE_API_BASE_URL, "
@@ -190,7 +221,10 @@ def judge_common(question: str, correct_answer: str, response: str) -> dict:
         response=response[:8000],
     )
     raw = call_gpt4o(prompt)
-    return parse_judge_response(raw)
+    parsed = parse_judge_response(raw)
+    # An unanswered judge call must not silently count as a wrong answer.
+    parsed["judge_failed"] = not re.search(r"correct:\s*(yes|no)", raw or "", re.IGNORECASE)
+    return parsed
 
 
 # ======================== Load & Process ========================
@@ -306,7 +340,8 @@ def run_eval(traj_dir: str, benchmark: str, max_workers: int = 4,
         "total": total,
         "correct": correct,
         "accuracy": f"{accuracy:.2f}%",
-        "judge_model": "gpt-4o",
+        "judge_model": JUDGE_MODEL if JUDGE_API_KEY else "gpt-4o",
+        "judge_failed": sum(1 for r in results if r.get("judge_failed")),
     }
 
     print(f"\n{'='*80}")

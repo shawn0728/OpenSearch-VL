@@ -105,6 +105,15 @@ def _add_inline_image(
     )
 
 
+def _as_list(value: Any) -> list:
+    """Parquet list columns come back as numpy arrays."""
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value if isinstance(value, list) else [value]
+
+
 def _bootstrap_images(
     row: Any,
     case_id: str,
@@ -144,8 +153,8 @@ def _bootstrap_images(
                 logger.warning("Failed to read local image %s: %s", local, exc)
 
     if not initial_parts:
-        images = row.get("images", []) if hasattr(row, "get") else []
-        for entry in images or []:
+        images = _as_list(row.get("images", [])) if hasattr(row, "get") else []
+        for entry in images:
             if entry is None:
                 continue
             url: Optional[str] = None
@@ -204,7 +213,7 @@ def process_single_case(
         case_id = row.get("data_id", f"case_{case_idx}")
         category = row.get("category", "unknown")
         data_source = row.get("data_source", "unknown")
-        prompt_list = row.get("prompt", [])
+        prompt_list = _as_list(row.get("prompt", []))
     else:
         case_id = f"case_{case_idx}"
         category = "unknown"
@@ -231,8 +240,11 @@ def process_single_case(
         row, case_id, case_idx, filename_prefix, image_urls_dict
     )
 
-    tools_text = f"<tools>\n{tools.get_tools_definition()}\n</tools>"
-    initial_parts.append({"text": tools_text + "\n\n" + prompt_text})
+    if getattr(runner, "prompt_in_system", False):
+        initial_parts.append({"text": prompt_text})
+    else:
+        tools_text = f"<tools>\n{tools.get_tools_definition()}\n</tools>"
+        initial_parts.append({"text": tools_text + "\n\n" + prompt_text})
 
     gemini_contents: List[Dict[str, Any]] = [
         {"role": "user", "parts": initial_parts}
@@ -246,7 +258,13 @@ def process_single_case(
         "prompt": prompt_list,
         "turns": [],
         "timestamp": datetime.now().isoformat(),
+        "stop_reason": "max_turns",
     }
+    if hasattr(row, "get") and row.get("answer") is not None:
+        trajectory["original_data"] = {
+            "question": prompt_text,
+            "answers": [str(row.get("answer"))],
+        }
 
     intermediate_dir = os.path.join(output_dir, "intermediate")
     cfg = inference_cfg or InferenceConfig()
@@ -261,6 +279,7 @@ def process_single_case(
         except Exception as exc:
             logger.error("Inference failed on turn %d: %s", turn_num, exc, exc_info=True)
             trajectory["turns"].append({"turn": turn_num, "error": str(exc)})
+            trajectory["stop_reason"] = "runner_exception"
             break
 
         response_text = ""
@@ -285,25 +304,41 @@ def process_single_case(
                 }
             )
 
+        finish = (candidates[0].get("finishReason") if candidates else None) or ""
+        if finish == "ERROR":
+            trajectory["stop_reason"] = "runner_error"
+            break
+
         if tools.has_response_tag(response_text):
+            trajectory["stop_reason"] = "response"
             break
 
         tool_call_json = tools.extract_tool_call(response_text)
         if not tool_call_json:
             logger.info("Turn %d ended without tool call or response tag.", turn_num)
+            trajectory["stop_reason"] = (
+                "max_tokens" if finish == "MAX_TOKENS" else "no_tool_call"
+            )
             break
 
         os.makedirs(intermediate_dir, exist_ok=True)
-        tool_message, new_images = tools.execute_tool(
-            tool_call_json,
-            image_paths_dict,
-            case_id,
-            case_idx,
-            turn_num,
-            intermediate_dir,
-            filename_prefix=filename_prefix,
-            visual_lookup=visual_lookup,
-        )
+        # A bad tool call is the agent's error to recover from, not a lost case.
+        try:
+            tool_message, new_images = tools.execute_tool(
+                tool_call_json,
+                image_paths_dict,
+                case_id,
+                case_idx,
+                turn_num,
+                intermediate_dir,
+                filename_prefix=filename_prefix,
+                visual_lookup=visual_lookup,
+            )
+        except Exception as exc:
+            logger.warning("Tool failed on turn %d: %s", turn_num, exc)
+            tool_message = f"Tool execution error:\n{type(exc).__name__}: {exc}"
+            new_images = {}
+        turn_record["tool_call"] = tool_call_json
         observation_text = f"<observation>\n{tool_message}\n</observation>"
         turn_record["tool_output"] = observation_text
 

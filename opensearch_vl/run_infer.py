@@ -74,6 +74,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--adapter",
+        type=str,
+        default=None,
+        help="LoRA adapter directory merged into the base model (qwen3.5 only).",
+    )
+    parser.add_argument(
+        "--shard",
+        type=str,
+        default="0/1",
+        help="i/k: only process rows with row_index %% k == i (parallel processes).",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip cases whose trajectory file already exists (resume).",
+    )
+    parser.add_argument(
         "--gpus",
         type=str,
         default="0",
@@ -171,6 +188,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         checkpoint=args.checkpoint,
         gpus=args.gpus,
         dtype=args.dtype,
+        adapter=args.adapter,
     )
     logger.info("Model: %s", runner.display_name)
 
@@ -207,10 +225,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_tokens=args.max_tokens,
     )
 
+    shard_i, shard_k = (int(x) for x in args.shard.split("/"))
     success, failure = 0, 0
     for idx in range(start, end):
+        if idx % shard_k != shard_i:
+            continue
         try:
             row = df.iloc[idx]
+            if args.skip_existing and os.path.exists(
+                os.path.join(
+                    args.output_dir,
+                    f"{row.get('data_id', f'case_{idx}')}_trajectory.json",
+                )
+            ):
+                continue
             pipeline.process_single_case(
                 row=row,
                 runner=runner,

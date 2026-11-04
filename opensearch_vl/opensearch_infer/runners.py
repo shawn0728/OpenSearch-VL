@@ -23,12 +23,17 @@ agnostic to the underlying provider. The minimal contract is::
 
 from __future__ import annotations
 
+import json
+import base64
+import io
 import logging
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from PIL import Image
 
 from . import auth, config, messages
 from .config import ModelSpec
@@ -712,6 +717,235 @@ class Qwen3VLRunner(BaseRunner):
 
 
 # ---------------------------------------------------------------------------
+# Qwen3.5 (optionally + LoRA adapter), rendered exactly like SFT training
+# ---------------------------------------------------------------------------
+
+
+SFT_PROMPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sft_prompt.json")
+
+
+class Qwen35SFTRunner(BaseRunner):
+    """Qwen3.5 inference with the prompt the SFT adapter was trained on.
+
+    The prompt is rendered by LLaMA-Factory's own ``qwen3_5`` template and
+    multimodal plugin (same system text, tool schema, ``<tool_response>``
+    wrapping, thoughts kept in history, image resizing), so what the model sees
+    matches training token for token; ``tests/test_sft_prompt_parity.py`` checks
+    this against LLaMA-Factory's real training preprocessing.
+
+    Note the template appends XML-style tool-call instructions while the system
+    text and SFT targets use JSON; ``tools.extract_tool_call`` accepts both, so
+    the base model is not penalised for following the template.
+    """
+
+    # The pipeline must not repeat the tool schema in the user message.
+    prompt_in_system = True
+
+    def __init__(
+        self,
+        spec: ModelSpec,
+        checkpoint: str,
+        adapter: Optional[str] = None,
+        gpus: str = "0",
+        dtype: str = "bfloat16",
+        image_max_pixels: int = 262144,
+        max_prompt_tokens: int = 32000,
+    ) -> None:
+        super().__init__(spec)
+        self.checkpoint = checkpoint
+        self.adapter = adapter
+        self.gpus = gpus
+        self.dtype_name = dtype
+        self.image_max_pixels = image_max_pixels
+        self.max_prompt_tokens = max_prompt_tokens
+        self._model = None
+        self._processor = None
+        self._tokenizer = None
+        self._template = None
+        self._system = ""
+        self._tools = ""
+
+    @property
+    def display_name(self) -> str:
+        suffix = " + SFT LoRA" if self.adapter else ""
+        return f"{self.spec.display_name}{suffix}"
+
+    def load_prompt_stack(self) -> None:
+        """Load tokenizer/processor/template only (no weights)."""
+        if self._template is not None:
+            return
+        from llamafactory.data.template import TEMPLATES  # type: ignore
+        from transformers import AutoProcessor, AutoTokenizer  # type: ignore
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self.checkpoint)
+        self._processor = AutoProcessor.from_pretrained(self.checkpoint)
+        self._processor.tokenizer = self._tokenizer
+        self._processor.image_max_pixels = self.image_max_pixels
+        self._processor.image_min_pixels = 32 * 32
+        self._processor.image_do_pad = False
+        self._template = TEMPLATES["qwen3_5"]
+        with open(SFT_PROMPT_PATH, encoding="utf-8") as fh:
+            prompt = json.load(fh)
+        self._system = prompt["system"]
+        self._tools = json.dumps(prompt["tools"], ensure_ascii=False)
+
+    def load(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from transformers import AutoModelForImageTextToText  # type: ignore
+
+        self.load_prompt_stack()
+        device = f"cuda:{self.gpus.split(',')[0]}" if torch.cuda.is_available() else "cpu"
+        model = AutoModelForImageTextToText.from_pretrained(
+            self.checkpoint, dtype=getattr(torch, self.dtype_name), device_map={"": device}
+        )
+        if self.adapter:
+            from peft import PeftModel  # type: ignore
+
+            model = PeftModel.from_pretrained(model, self.adapter).merge_and_unload()
+            logger.info("Merged LoRA adapter %s", self.adapter)
+        model.eval()
+        self._model = model
+        self._device = torch.device(device)
+        ids = [self._tokenizer.convert_tokens_to_ids("<|im_end|>")]
+        if self._tokenizer.eos_token_id not in ids:
+            ids.append(self._tokenizer.eos_token_id)
+        self._eos_ids = ids
+
+    # ------------------------------------------------------------- rendering
+
+    @staticmethod
+    def _decode_part_image(part: Dict[str, Any]):
+        if "inline_data" in part:
+            payload = part["inline_data"].get("data", "")
+            if "base64," in payload:
+                payload = payload.split("base64,", 1)[1]
+            return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+        value = part["image_url"]
+        url = value.get("url", "") if isinstance(value, dict) else str(value)
+        image = messages._resolve_image_url_to_pil(url) if url else None
+        if image is None:
+            raise RuntimeError(f"cannot load image {url!r}")
+        return image.convert("RGB")
+
+    def contents_to_template(self, contents: Iterable[Dict[str, Any]]):
+        """Pipeline contents -> (LLaMA-Factory messages, images)."""
+        msgs: List[Dict[str, str]] = []
+        images: List[Any] = []
+        for item in contents:
+            parts = item.get("parts", []) or []
+            text = "".join(p["text"] for p in parts if "text" in p)
+            if item.get("role") == "model":
+                msgs.append({"role": "assistant", "content": text})
+                continue
+            part_images = [
+                self._decode_part_image(p)
+                for p in parts
+                if "inline_data" in p or "image_url" in p
+            ]
+            images.extend(part_images)
+            # Training data always places <image> before the text of a turn.
+            msgs.append(
+                {
+                    "role": "user" if not msgs else "observation",
+                    "content": "<image>" * len(part_images) + text,
+                }
+            )
+        return msgs, images
+
+    def build_prompt_ids(self, msgs: List[Dict[str, str]], images: List[Any]) -> List[int]:
+        rendered = self._template.mm_plugin.process_messages(
+            msgs + [{"role": "assistant", "content": ""}], images, [], [], self._processor
+        )
+        pairs = self._template.encode_multiturn(
+            self._tokenizer, rendered, self._system, self._tools
+        )
+        ids: List[int] = []
+        for prompt_ids, response_ids in pairs[:-1]:
+            ids += prompt_ids + response_ids
+        return ids + pairs[-1][0]
+
+    def infer(
+        self,
+        contents: Iterable[Dict[str, Any]],
+        system_instruction: Optional[str] = None,
+        cfg: Optional[InferenceConfig] = None,
+    ) -> Dict[str, Any]:
+        if self._model is None:
+            self.load()
+        cfg = cfg or InferenceConfig()
+        try:
+            msgs, images = self.contents_to_template(contents)
+            prompt_ids = self.build_prompt_ids(msgs, images)
+            if len(prompt_ids) > self.max_prompt_tokens:
+                return _empty_response(
+                    self.display_name,
+                    f"context_limit: prompt has {len(prompt_ids)} tokens "
+                    f"(> {self.max_prompt_tokens})",
+                )
+            text, gen_len, finish = self._generate_ids(prompt_ids, images, cfg)
+        except Exception as exc:
+            logger.error("Qwen3.5 inference failed: %s", exc, exc_info=True)
+            return _empty_response(self.display_name, str(exc))
+        return {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": text}]},
+                    "finishReason": finish,
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": len(prompt_ids),
+                "candidatesTokenCount": gen_len,
+                "totalTokenCount": len(prompt_ids) + gen_len,
+            },
+            "modelVersion": self.display_name,
+            "raw_response": {"text": text},
+        }
+
+    def _generate_ids(self, prompt_ids: List[int], images: List[Any], cfg: InferenceConfig):
+        import torch
+
+        input_ids = torch.tensor([prompt_ids], device=self._device)
+        kwargs: Dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+        }
+        if images:
+            mm = self._template.mm_plugin._get_mm_inputs(images, [], [], self._processor)
+            for key, value in mm.items():
+                if isinstance(value, torch.Tensor):
+                    value = value.to(self._device)
+                    if value.dtype.is_floating_point:
+                        value = value.to(self._model.dtype)
+                kwargs[key] = value
+        # Same mrope inputs as LLaMA-Factory's collator.
+        config_ = self._model.config
+        mm_types = torch.zeros_like(input_ids)
+        mm_types[input_ids == config_.image_token_id] = 1
+        mm_types[input_ids == config_.video_token_id] = 2
+        kwargs["mm_token_type_ids"] = mm_types
+
+        gen_kwargs: Dict[str, Any] = {
+            "max_new_tokens": cfg.max_tokens,
+            "do_sample": cfg.temperature > 0,
+            "eos_token_id": self._eos_ids,
+            "pad_token_id": self._tokenizer.pad_token_id,
+        }
+        if cfg.temperature > 0:
+            gen_kwargs.update(temperature=cfg.temperature, top_p=0.8, top_k=20)
+        with torch.no_grad():
+            out = self._model.generate(**kwargs, **gen_kwargs)
+        new_ids = out[0][input_ids.shape[1]:]
+        hit_eos = len(new_ids) > 0 and int(new_ids[-1]) in self._eos_ids
+        text = self._tokenizer.decode(
+            new_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        return text, int(new_ids.shape[0]), "STOP" if hit_eos else "MAX_TOKENS"
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -721,6 +955,7 @@ def build_runner(
     checkpoint: Optional[str] = None,
     gpus: str = "0",
     dtype: str = "bfloat16",
+    adapter: Optional[str] = None,
 ) -> BaseRunner:
     if model_name not in config.MODEL_REGISTRY:
         raise KeyError(
@@ -731,6 +966,14 @@ def build_runner(
         return ClaudeRunner(spec)
     if spec.family == "minimax":
         return MiniMaxRunner(spec)
+    if spec.family == "qwen3_5":
+        return Qwen35SFTRunner(
+            spec,
+            checkpoint=config.resolve_checkpoint(spec, checkpoint),
+            adapter=adapter,
+            gpus=gpus,
+            dtype=dtype,
+        )
     return Qwen3VLRunner(
         spec,
         checkpoint=config.resolve_checkpoint(spec, checkpoint),

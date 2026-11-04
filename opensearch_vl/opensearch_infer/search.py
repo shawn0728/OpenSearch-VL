@@ -17,14 +17,17 @@ the tool returns a clear, recoverable error message instead of raising.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional
 
 import requests
+from PIL import Image
 
 from . import config
 
@@ -130,6 +133,31 @@ def layout_parsing(
 # ---------------------------------------------------------------------------
 
 
+def _summary_payload(prompt: str) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "model": config.QWEN_MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+        "temperature": 0.3,
+    }
+    if config.LLM_EXTRA_BODY:
+        payload.update(config.LLM_EXTRA_BODY)
+    else:  # local vLLM-style server hosting Qwen
+        payload["top_p"] = 0.95
+        payload["extra_body"] = {
+            "top_k": 20,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    return payload
+
+
+def _summary_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if config.QWEN_API_KEY:
+        headers["Authorization"] = f"Bearer {config.QWEN_API_KEY}"
+    return headers
+
+
 def summarize_with_qwen(content: str, query: str, title: str) -> str:
     """Generate a short, query-focused summary for a single page."""
 
@@ -137,25 +165,15 @@ def summarize_with_qwen(content: str, query: str, title: str) -> str:
         f"Based on the following webpage content, provide a concise summary "
         f"that is relevant to the query: \"{query}\"\n\n"
         f"Webpage Title: {title}\n"
-        f"Content:\n{content[:2000]}\n\n"
+        f"Content:\n{content[:config.SUMMARY_CONTENT_MAX_CHARS]}\n\n"
         f"Please provide a focused summary (2-4 sentences) that directly "
         f"addresses the query. Focus on the most relevant information."
     )
-    payload = {
-        "model": config.QWEN_MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-        "temperature": 0.3,
-        "top_p": 0.95,
-        "extra_body": {
-            "top_k": 20,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-    }
+    payload = _summary_payload(prompt)
     try:
         response = requests.post(
             f"{config.QWEN_API_BASE.rstrip('/')}/chat/completions",
-            headers={"Content-Type": "application/json"},
+            headers=_summary_headers(),
             json=payload,
             timeout=60,
         )
@@ -191,21 +209,11 @@ def summarize_image_search(result_obj: object) -> object:
         "fields. Remove any irrelevant details, descriptions, or metadata that "
         "are not directly related to identifying the object/entity."
     )
-    payload = {
-        "model": config.QWEN_MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1024,
-        "temperature": 0.3,
-        "top_p": 0.95,
-        "extra_body": {
-            "top_k": 20,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-    }
+    payload = _summary_payload(prompt)
     try:
         response = requests.post(
             f"{config.QWEN_API_BASE.rstrip('/')}/chat/completions",
-            headers={"Content-Type": "application/json"},
+            headers=_summary_headers(),
             json=payload,
             timeout=60,
         )
@@ -342,8 +350,176 @@ def _read_via_jina(url: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek Search & Fetch
+# ---------------------------------------------------------------------------
+
+_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+_DEEPSEEK_QUERY_MAX_CHARS = 128  # hard API limit
+
+
+def _post_with_retries(url, headers, payload, attempts=5, timeout=60):
+    """POST, retrying documented transient statuses with backoff."""
+    last: Optional[requests.Response] = None
+    for attempt in range(attempts):
+        try:
+            last = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if last.status_code not in _RETRY_STATUS:
+                return last
+        except requests.RequestException as exc:
+            if attempt == attempts - 1:
+                raise
+            logger.debug("POST %s failed: %s", url, exc)
+        time.sleep(2 * (attempt + 1))
+    return last
+
+
+def _deepseek_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _deepseek_fetch(url: str) -> str:
+    """Page Markdown, or "" (Fetch returns 403/404 for e.g. Wikipedia, BBC)."""
+    try:
+        response = _post_with_retries(
+            f"{config.DEEPSEEK_API_BASE}/v1/tools/fetch",
+            _deepseek_headers(),
+            {"url": url},
+            attempts=3,
+        )
+    except requests.RequestException:
+        return ""
+    if response is None or response.status_code != 200:
+        return ""
+    return (response.json().get("content") or "").strip()
+
+
+def _text_search_deepseek(query: str, top_k: int) -> str:
+    """DeepSeek Search -> page text (search index, else Fetch) -> summaries."""
+    top_k = max(1, min(int(top_k), 10))
+    payload = {
+        "query": query.strip()[:_DEEPSEEK_QUERY_MAX_CHARS],
+        "count": top_k,
+        "need_content": True,
+    }
+    try:
+        response = _post_with_retries(
+            f"{config.DEEPSEEK_API_BASE}/v1/tools/search", _deepseek_headers(), payload
+        )
+    except requests.RequestException as exc:
+        return f"Tool execution error:\nText search failed: {exc}"
+    if response is None or response.status_code != 200:
+        code = None if response is None else response.status_code
+        return f"Tool execution error:\nText search failed: HTTP {code}"
+    results = (response.json().get("results") or [])[:top_k]
+    if not results:
+        return "Tool execution result:\nNo relevant web pages found for the query."
+
+    def one(item: dict) -> str:
+        url, title = item.get("url", ""), item.get("title", "")
+        content = (item.get("content") or "").strip()
+        if not content and url:
+            content = _deepseek_fetch(url)
+        if not content:
+            content = item.get("summary") or item.get("snippet") or ""
+        return summarize_with_qwen(content=content, query=query, title=title)
+
+    with ThreadPoolExecutor(max_workers=len(results)) as pool:
+        summaries = list(pool.map(one, results))
+
+    out = "Tool execution result:\n\n"
+    for idx, (item, summary) in enumerate(zip(results, summaries), start=1):
+        out += (
+            f"\n{'=' * 60}[Passage {idx}]\n"
+            f"Title: {item.get('title', '')}\n"
+            f"URL: {item.get('url', '')}\n"
+            f"Summary:\n{summary}\n"
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 豆包搜索 Global (reverse image search)
+# ---------------------------------------------------------------------------
+
+_DOUBAO_RETRY_CODES = {700429, 10500, 10501}
+
+
+def _encode_for_visual_search(image_bytes: bytes) -> bytes:
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    edge = config.IMAGE_SEARCH_MAX_EDGE
+    if max(image.size) > edge:
+        image.thumbnail((edge, edge), Image.LANCZOS)
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+def image_search_bytes(image_bytes: bytes, attempts: int = 4) -> str:
+    """Visual search by image content; no public URL or object storage needed."""
+    try:
+        encoded = _encode_for_visual_search(image_bytes)
+    except Exception as exc:
+        return f"Tool execution error:\nCannot decode image: {exc}"
+    payload = {
+        "SearchType": "visual",
+        "ImageQuery": {"ImageBase64": base64.b64encode(encoded).decode("ascii")},
+        "DocCount": max(1, min(config.IMAGE_SEARCH_DOC_COUNT, 20)),
+        "EnableWaiting": True,  # queue server-side when over the QPS limit
+        "MaxWaitTime": 10000,
+    }
+    headers = {
+        "Authorization": f"Bearer {config.DOUBAO_SEARCH_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    code: object = None
+    for attempt in range(attempts):
+        try:
+            response = requests.post(
+                config.DOUBAO_SEARCH_URL, headers=headers, json=payload, timeout=60
+            )
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            code = type(exc).__name__
+        else:
+            result = data.get("Result") or {}
+            error = (data.get("ResponseMetadata") or {}).get("Error")
+            code = result.get("ErrorCode") or (error or {}).get("Code")
+            if response.status_code == 200 and not code:
+                docs = [
+                    {
+                        "title": (doc.get("Title") or "").strip(),
+                        "source": (doc.get("HostInfo") or {}).get("Hostname") or "",
+                        "url": doc.get("Url", ""),
+                    }
+                    for doc in result.get("Documents") or []
+                ]
+                if not docs:
+                    return "Tool execution result:\nNo visually similar results found."
+                summary = summarize_image_search({"organic": docs})
+                return "Tool execution result:\n" + json.dumps(
+                    summary, ensure_ascii=False, indent=2
+                )
+            code = code or response.status_code
+            if code not in _DOUBAO_RETRY_CODES and response.status_code < 500:
+                break
+        time.sleep(2 * (attempt + 1))
+    # Only the code: provider messages may contain agent-directed instructions.
+    return f"Tool execution error:\nimage_search failed (code {code})"
+
+
+def visual_backend_enabled() -> bool:
+    return bool(config.DOUBAO_SEARCH_API_KEY)
+
+
 def text_search(query: str, lang: str = "en", top_k: int = 5) -> str:
-    """Run a Serper search, fetch each page through Jina and summarise."""
+    """Run a web search, read the top pages and summarise them."""
+
+    if config.DEEPSEEK_API_KEY:
+        return _text_search_deepseek(query, top_k)
 
     use_gateway = config.gateway_enabled()
     try:

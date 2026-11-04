@@ -14,6 +14,9 @@ from PIL import Image
 from . import image_io
 
 
+from . import config
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,21 +187,39 @@ class ImageEnhancementEngine:
     def apply_super_resolution(
         self, model_path: str = "EDSR_x4.pb", scale: int = 4
     ) -> Optional[np.ndarray]:
+        """EDSR x4 on CPU. Raises on failure so a no-op is never reported as success.
+
+        Input is first capped to ``SR_MAX_INPUT_EDGE``; only x4 weights exist,
+        so scale 2/3 are x4 plus an area downscale.
+        """
         if self.current_image is None:
             return None
         if not os.path.exists(model_path):
-            logger.info(
-                "Super-resolution model %s not found; returning original image.",
-                model_path,
+            raise FileNotFoundError(
+                f"EDSR weights not found at {model_path!r} (set SR_MODEL_PATH)"
             )
-            return self.current_image
-        try:
-            sr = cv2.dnn_superres.DnnSuperResImpl_create()
-            sr.readModel(model_path)
-            sr.setModel("edsr", scale)
-            self.current_image = sr.upsample(self.current_image)
-        except Exception as exc:
-            logger.warning("Super resolution failed: %s", exc)
+        image = self.current_image
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        scale = scale if scale in (2, 3, 4) else 4
+        h, w = image.shape[:2]
+        if max(h, w) > config.SR_MAX_INPUT_EDGE:
+            factor = config.SR_MAX_INPUT_EDGE / max(h, w)
+            image = cv2.resize(
+                image,
+                (max(1, int(w * factor)), max(1, int(h * factor))),
+                interpolation=cv2.INTER_AREA,
+            )
+            h, w = image.shape[:2]
+        sr = cv2.dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(model_path)
+        sr.setModel("edsr", 4)
+        out = sr.upsample(image)
+        if scale != 4:
+            out = cv2.resize(out, (w * scale, h * scale), interpolation=cv2.INTER_AREA)
+        self.current_image = out
         return self.current_image
 
     def enhance_sharpness(self, amount: float = 1.5) -> Optional[np.ndarray]:

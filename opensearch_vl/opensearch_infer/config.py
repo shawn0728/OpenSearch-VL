@@ -8,6 +8,7 @@ override the value via the CLI.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -64,7 +65,39 @@ JINA_READER_URL: str = os.environ.get("JINA_READER_URL", "https://r.jina.ai/")
 # ---------------------------------------------------------------------------
 
 QWEN_API_BASE: str = os.environ.get("QWEN_API_BASE", "http://localhost:8000/v1")
-QWEN_MODEL_NAME: str = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen3-32B")
+QWEN_MODEL_NAME: str = os.environ.get(
+    "QWEN_MODEL_NAME", os.environ.get("QWEN_MODEL", "Qwen/Qwen3-32B")
+)
+QWEN_API_KEY: str = os.environ.get("QWEN_API_KEY", "")
+# Page text handed to the summariser (2000 often misses the answer on long pages).
+SUMMARY_CONTENT_MAX_CHARS: int = int(os.environ.get("SUMMARY_CONTENT_MAX_CHARS", "6000"))
+# Provider-specific chat body, e.g. '{"thinking": {"type": "disabled"}}' for DeepSeek.
+try:
+    LLM_EXTRA_BODY: Dict[str, object] = json.loads(
+        os.environ.get("LLM_EXTRA_BODY_JSON", "") or "{}"
+    )
+except json.JSONDecodeError:
+    LLM_EXTRA_BODY = {}
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek Search & Fetch (text_search / web_search) and 豆包搜索 Global
+# (image_search, SearchType=visual, base64 upload). When the keys are set they
+# take precedence over the gateway / Serper / Jina / external lookup paths.
+# ---------------------------------------------------------------------------
+
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_BASE: str = os.environ.get(
+    "DEEPSEEK_API_BASE", "https://api.deepseek.com"
+).rstrip("/")
+DOUBAO_SEARCH_API_KEY: str = os.environ.get("DOUBAO_SEARCH_API_KEY", "")
+DOUBAO_SEARCH_URL: str = os.environ.get(
+    "DOUBAO_SEARCH_URL", "https://open.feedcoopapi.com/search_api/global_search"
+)
+IMAGE_SEARCH_MAX_EDGE: int = int(os.environ.get("IMAGE_SEARCH_MAX_EDGE", "1024"))
+IMAGE_SEARCH_DOC_COUNT: int = int(os.environ.get("IMAGE_SEARCH_DOC_COUNT", "10"))
+# EDSR x4 is CPU-bound: ~4 s for 256x256, ~17 s for 512x512 on 24 cores.
+SR_MAX_INPUT_EDGE: int = int(os.environ.get("SR_MAX_INPUT_EDGE", "384"))
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +228,14 @@ MODEL_REGISTRY: Dict[str, ModelSpec] = {
         default_checkpoint_env="QWEN3VL_30B_A3B_PATH",
         default_checkpoint="Qwen/Qwen3-VL-30B-A3B-Instruct",
         needs_moe_patch=True,
+    ),
+    "qwen3.5-4b": ModelSpec(
+        name="qwen3.5-4b",
+        family="qwen3_5",
+        display_name="Qwen3.5-4B",
+        default_checkpoint_env="QWEN35_4B_PATH",
+        default_checkpoint="Qwen/Qwen3.5-4B",
+        supports_multi_gpu=False,
     ),
     "claude": ModelSpec(
         name="claude",
