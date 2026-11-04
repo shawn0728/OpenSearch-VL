@@ -169,14 +169,17 @@ def _summary_payload(prompt: str) -> Dict[str, object]:
         "max_tokens": 1024,
         "temperature": 0.3,
     }
-    if config.LLM_EXTRA_BODY:
-        payload.update(config.LLM_EXTRA_BODY)
+    extra = config.SUMMARY_EXTRA_BODY
+    if extra is None:
+        extra = config.LLM_EXTRA_BODY
+    if extra:
+        payload.update(extra)
     else:  # local vLLM-style server hosting Qwen
+        # Raw HTTP: vLLM reads these at the top level ("extra_body" is an
+        # OpenAI-SDK-only wrapper and would be silently ignored, leaving thinking on).
         payload["top_p"] = 0.95
-        payload["extra_body"] = {
-            "top_k": 20,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
+        payload["top_k"] = 20
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
 
 

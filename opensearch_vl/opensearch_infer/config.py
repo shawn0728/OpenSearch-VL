@@ -78,6 +78,12 @@ try:
     )
 except json.JSONDecodeError:
     LLM_EXTRA_BODY = {}
+# Summariser-only body; set when the summariser and the judge use different
+# providers (e.g. local vLLM summariser + DeepSeek judge). Unset = use LLM_EXTRA_BODY.
+_summary_extra = os.environ.get("SUMMARY_EXTRA_BODY_JSON")
+SUMMARY_EXTRA_BODY: Optional[Dict[str, object]] = (
+    json.loads(_summary_extra) if _summary_extra else None
+)
 
 
 # ---------------------------------------------------------------------------

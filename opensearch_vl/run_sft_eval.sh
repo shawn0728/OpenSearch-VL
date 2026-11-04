@@ -50,6 +50,23 @@ if ! ocr_up; then
 fi
 echo "[$(date +%T)] OCR service ready"
 
+# ── optional local summariser (SUMMARY_LOCAL=1): vLLM on GPU 1, judge stays remote ──
+SUM_PID=""
+cleanup() { [ -n "$OCR_PID" ] && kill "$OCR_PID" 2>/dev/null; [ -n "$SUM_PID" ] && kill "$SUM_PID" 2>/dev/null; }
+if [ "${SUMMARY_LOCAL:-0}" = 1 ]; then
+  sum_up() { curl -s -m 5 -o /dev/null -f http://127.0.0.1:8000/v1/models; }
+  if ! sum_up; then
+    bash "$HERE/start_summary_service.sh" > "$OUTPUT_ROOT/summary_service.log" 2>&1 &
+    SUM_PID=$!
+    for _ in $(seq 1 90); do sum_up && break; kill -0 "$SUM_PID" 2>/dev/null || break; sleep 10; done
+    sum_up || { echo "ERROR: summariser did not start"; tail -30 "$OUTPUT_ROOT/summary_service.log"; exit 1; }
+  fi
+  export QWEN_API_BASE=http://127.0.0.1:8000/v1 QWEN_MODEL=summariser QWEN_MODEL_NAME=summariser QWEN_API_KEY=
+  # Must be explicit: unset would fall back to the DeepSeek judge body and leave thinking on.
+  export SUMMARY_EXTRA_BODY_JSON='{"top_p": 0.8, "top_k": 20, "chat_template_kwargs": {"enable_thinking": false}}'
+  echo "[$(date +%T)] local summariser ready"
+fi
+
 # ── inference: all tags in parallel, shards share the GPU ────────────────
 pids=()
 for tag in $TAGS; do
