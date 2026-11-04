@@ -306,7 +306,10 @@ def process_single_case(
 
         finish = (candidates[0].get("finishReason") if candidates else None) or ""
         if finish == "ERROR":
-            trajectory["stop_reason"] = "runner_error"
+            # A prompt outgrowing the context is the agent's outcome, not a crash.
+            trajectory["stop_reason"] = (
+                "context_limit" if "context_limit" in response_text else "runner_error"
+            )
             break
 
         if tools.has_response_tag(response_text):

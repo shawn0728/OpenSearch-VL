@@ -920,12 +920,6 @@ class Qwen35SFTRunner(BaseRunner):
                     if value.dtype.is_floating_point:
                         value = value.to(self._model.dtype)
                 kwargs[key] = value
-        # Same mrope inputs as LLaMA-Factory's collator.
-        config_ = self._model.config
-        mm_types = torch.zeros_like(input_ids)
-        mm_types[input_ids == config_.image_token_id] = 1
-        mm_types[input_ids == config_.video_token_id] = 2
-        kwargs["mm_token_type_ids"] = mm_types
 
         gen_kwargs: Dict[str, Any] = {
             "max_new_tokens": cfg.max_tokens,

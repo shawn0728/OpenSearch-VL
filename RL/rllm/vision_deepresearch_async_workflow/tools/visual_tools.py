@@ -392,7 +392,18 @@ def layout_parsing(
             return {"error": f"API HTTP {resp.status_code}: {resp.text[:200]}", "rec_texts": [], "formatted_text": "", "blocks": []}
 
         result = resp.json().get("result", {})
-        TEXT_LABELS = {"paragraph_title", "text", "vision_footnote"}
+        TEXT_LABELS = {
+            "abstract",
+            "content",
+            "doc_title",
+            "figure_title",
+            "paragraph_title",
+            "reference",
+            "reference_content",
+            "table",
+            "text",
+            "vision_footnote",
+        }
         blocks = (
             result.get("layoutParsingResults", [{}])[0]
             .get("prunedResult", {})

@@ -54,6 +54,28 @@ failed=0
 for p in "${pids[@]}"; do wait "$p" || failed=$((failed + 1)); done
 echo "[$(date +%T)] inference done (${failed} processes failed)"
 
+# ── abort on broken inference: no judge calls, no OK on invalid results ──
+python - "$WORK" $TAGS <<'PY' || exit 1
+import collections, glob, json, os, sys
+work, tags = sys.argv[1], sys.argv[2:]
+bad = False
+for tag in tags:
+    stops, sample = collections.Counter(), ""
+    for path in glob.glob(os.path.join(work, tag, "*_trajectory.json")):
+        traj = json.load(open(path, encoding="utf-8"))
+        stop = traj.get("stop_reason", "?")
+        stops[stop] += 1
+        if stop in ("runner_error", "runner_exception") and not sample:
+            sample = (traj.get("final_response_text") or str(traj.get("turns", [])[-1:]))[:400]
+    total = sum(stops.values())
+    broken = stops["runner_error"] + stops["runner_exception"]
+    print(f"{tag}: {total} trajectories, stop reasons {dict(stops)}")
+    if total == 0 or broken / total > 0.2:
+        bad = True
+        print(f"ERROR: {tag}: {broken}/{total} cases hit runner failures. First: {sample}")
+sys.exit(1 if bad else 0)
+PY
+
 # ── judge + summary ──────────────────────────────────────────────────────
 runs=()
 for tag in $TAGS; do

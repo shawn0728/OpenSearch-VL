@@ -37,6 +37,7 @@ to open-source.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -169,6 +170,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _already_done(path: str) -> bool:
+    """A trajectory that ended in a runner failure is redone, not reused."""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stop = json.load(fh).get("stop_reason")
+    except (OSError, ValueError):
+        return False
+    return stop not in {"runner_error", "runner_exception"}
+
+
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         format="[%(asctime)s][%(levelname)5s][%(name)s] %(message)s",
@@ -232,7 +245,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             continue
         try:
             row = df.iloc[idx]
-            if args.skip_existing and os.path.exists(
+            if args.skip_existing and _already_done(
                 os.path.join(
                     args.output_dir,
                     f"{row.get('data_id', f'case_{idx}')}_trajectory.json",

@@ -101,7 +101,18 @@ def layout_parsing(
             }
 
         result = response.json().get("result", {})
-        text_labels = {"paragraph_title", "text", "vision_footnote"}
+        text_labels = {
+            "abstract",
+            "content",
+            "doc_title",
+            "figure_title",
+            "paragraph_title",
+            "reference",
+            "reference_content",
+            "table",
+            "text",
+            "vision_footnote",
+        }
         blocks = (
             result.get("layoutParsingResults", [{}])[0]
             .get("prunedResult", {})
