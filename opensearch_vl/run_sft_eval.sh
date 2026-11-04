@@ -24,6 +24,19 @@ set -a; . "$SECRETS"; set +a
 : "${OUTPUT_ROOT:?OUTPUT_ROOT must be set}"
 mkdir -p "$WORK"
 
+# ── DeepSeek is prepaid: refuse to start a run the balance cannot finish ──
+python - <<'PY' || exit 1
+import os, requests
+need = float(os.environ.get("MIN_DEEPSEEK_CNY", "0"))
+r = requests.get("https://api.deepseek.com/user/balance", timeout=30,
+                 headers={"Authorization": f"Bearer {os.environ['DEEPSEEK_API_KEY']}"})
+r.raise_for_status()
+total = sum(float(b["total_balance"]) for b in r.json()["balance_infos"])
+print(f"DeepSeek balance: {total:.2f} (required {need:.2f})")
+if total < need:
+    raise SystemExit("ERROR: top up DeepSeek before running this evaluation")
+PY
+
 # ── OCR service for layout_parsing ───────────────────────────────────────
 OCR_PID=""
 cleanup() { [ -n "$OCR_PID" ] && kill "$OCR_PID" 2>/dev/null; }
@@ -57,6 +70,11 @@ done
 failed=0
 for p in "${pids[@]}"; do wait "$p" || failed=$((failed + 1)); done
 echo "[$(date +%T)] inference done (${failed} processes failed)"
+if [ "$failed" -ne 0 ]; then
+  grep -h "Stopping:" "$OUTPUT_ROOT"/infer_*.log | sort -u | head -5
+  echo "ERROR: inference incomplete, not judging. Re-run the same command to resume; finished cases are kept."
+  exit 1
+fi
 
 # ── abort on broken inference: no judge calls, no OK on invalid results ──
 python - "$WORK" $TAGS <<'PY' || exit 1

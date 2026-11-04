@@ -48,6 +48,7 @@ import pandas as pd
 
 from opensearch_infer import config, pipeline
 from opensearch_infer.runners import InferenceConfig, build_runner
+from opensearch_infer.search import FatalServiceError
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -269,6 +270,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 inference_cfg=inference_cfg,
             )
             success += 1
+        except FatalServiceError as exc:
+            logger.error("Stopping: %s. Fix it and re-run with --skip-existing.", exc)
+            return 3
         except Exception as exc:
             failure += 1
             logger.error("Case %d failed: %s", idx, exc)

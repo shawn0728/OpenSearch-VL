@@ -35,6 +35,24 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
+class FatalServiceError(RuntimeError):
+    """Out of credit or bad credentials: stop the run.
+
+    Returning this as a tool error would let the agent carry on without search
+    and the case would look finished, silently corrupting the comparison.
+    """
+
+
+_FATAL_HTTP = {401, 402}  # DeepSeek: invalid key, insufficient balance
+# Documented input error; anything else non-retryable means the account/key is at fault.
+_DOUBAO_BAD_INPUT = {10400}
+
+
+def _raise_if_fatal(service: str, status: int) -> None:
+    if status in _FATAL_HTTP:
+        raise FatalServiceError(f"{service}: HTTP {status} (invalid key or insufficient balance)")
+
+
 # ---------------------------------------------------------------------------
 # Layout parsing
 # ---------------------------------------------------------------------------
@@ -188,6 +206,7 @@ def summarize_with_qwen(content: str, query: str, title: str) -> str:
             json=payload,
             timeout=60,
         )
+        _raise_if_fatal("summariser", response.status_code)
         if response.status_code == 200:
             data = response.json()
             choices = data.get("choices", [])
@@ -195,6 +214,8 @@ def summarize_with_qwen(content: str, query: str, title: str) -> str:
                 summary = choices[0].get("message", {}).get("content", "")
                 if summary:
                     return summary.strip()
+    except FatalServiceError:
+        raise
     except Exception as exc:
         logger.warning("Qwen summarization failed: %s", exc)
     return content[:500] + ("..." if len(content) > 500 else "")
@@ -228,6 +249,7 @@ def summarize_image_search(result_obj: object) -> object:
             json=payload,
             timeout=60,
         )
+        _raise_if_fatal("summariser", response.status_code)
         if response.status_code == 200:
             choices = response.json().get("choices", [])
             if choices:
@@ -242,6 +264,8 @@ def summarize_image_search(result_obj: object) -> object:
                         return json.loads(text.strip())
                     except json.JSONDecodeError:
                         return {"summary": text.strip()}
+    except FatalServiceError:
+        raise
     except Exception as exc:
         logger.warning("Qwen image-search summarization failed: %s", exc)
 
@@ -403,6 +427,8 @@ def _deepseek_fetch(url: str) -> str:
         )
     except requests.RequestException:
         return ""
+    if response is not None:
+        _raise_if_fatal("DeepSeek Fetch", response.status_code)
     if response is None or response.status_code != 200:
         return ""
     return (response.json().get("content") or "").strip()
@@ -422,6 +448,8 @@ def _text_search_deepseek(query: str, top_k: int) -> str:
         )
     except requests.RequestException as exc:
         return f"Tool execution error:\nText search failed: {exc}"
+    if response is not None:
+        _raise_if_fatal("DeepSeek Search", response.status_code)
     if response is None or response.status_code != 200:
         code = None if response is None else response.status_code
         return f"Tool execution error:\nText search failed: HTTP {code}"
@@ -516,6 +544,8 @@ def image_search_bytes(image_bytes: bytes, attempts: int = 4) -> str:
                 )
             code = code or response.status_code
             if code not in _DOUBAO_RETRY_CODES and response.status_code < 500:
+                if code not in _DOUBAO_BAD_INPUT:
+                    raise FatalServiceError(f"Doubao search: code {code}")
                 break
         time.sleep(2 * (attempt + 1))
     # Only the code: provider messages may contain agent-directed instructions.

@@ -337,6 +337,8 @@ def process_single_case(
                 filename_prefix=filename_prefix,
                 visual_lookup=visual_lookup,
             )
+        except tools.search.FatalServiceError:
+            raise  # no trajectory is written, so a resumed run redoes this case
         except Exception as exc:
             logger.warning("Tool failed on turn %d: %s", turn_num, exc)
             tool_message = f"Tool execution error:\n{type(exc).__name__}: {exc}"
