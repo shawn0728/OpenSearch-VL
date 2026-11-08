@@ -58,7 +58,8 @@ if [ "${SUMMARY_LOCAL:-0}" = 1 ]; then
   if ! sum_up; then
     bash "$HERE/start_summary_service.sh" > "$OUTPUT_ROOT/summary_service.log" 2>&1 &
     SUM_PID=$!
-    for _ in $(seq 1 90); do sum_up && break; kill -0 "$SUM_PID" 2>/dev/null || break; sleep 10; done
+    # first start: ~12 min to read 29 GB from the netdisk + compile + CUDA graphs
+    for _ in $(seq 1 150); do sum_up && break; kill -0 "$SUM_PID" 2>/dev/null || break; sleep 10; done
     sum_up || { echo "ERROR: summariser did not start"; tail -30 "$OUTPUT_ROOT/summary_service.log"; exit 1; }
   fi
   export QWEN_API_BASE=http://127.0.0.1:8000/v1 QWEN_MODEL=summariser QWEN_MODEL_NAME=summariser QWEN_API_KEY=
