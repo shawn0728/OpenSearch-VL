@@ -15,7 +15,8 @@ Pipeline
      unbalanced one is rejected);
    - images: ``<image>`` count == len(images); every file exists, decodes,
      is ≥ 28 px per side and has aspect ratio < 200 (Qwen processor limits);
-   - length: text tokens (Qwen3.5 tokenizer) + vision tokens (smart_resize at
+   - loops: the same tool call (name + arguments) twice in one trajectory;
+   - length: text tokens (target model's tokenizer) + vision tokens (smart_resize at
      ``--image-max-pixels``) + per-message overhead ≤ ``--cutoff-len``
      (with ``--length-margin`` slack) — samples are dropped, never truncated;
    - test overlap: question text (exact normalised match, or 5-gram Jaccard
@@ -60,6 +61,8 @@ SOURCES = {
 }
 ENHANCE_TOOLS = {"sharpen", "super_resolution", "perspective_correct"}
 CROP_OCR_TOOLS = {"crop", "layout_parsing"}
+# Heuristic, report-only: observation looks like a failed tool call.
+TOOL_ERROR_RE = re.compile(r"tool execution error|\berror\b|failed to|timed? ?out|no results? found", re.I)
 RETRIEVAL_TOOLS = {"text_search", "image_search", "web_search", "visit"}
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
 EVAL_Q_PREFIX_RE = re.compile(r"^\s*image_id:.*?Question:\s*", re.S | re.I)
@@ -115,7 +118,8 @@ def phash_int(img) -> int:
 # ─────────────────────── per-sample structure check ──────────────────────
 def check_structure(sample: dict) -> tuple[str | None, dict]:
     conv = sample.get("conversations") or []
-    info = {"tools": [], "n_calls": 0}
+    info = {"tools": [], "n_calls": 0, "tool_error": False}
+    seen_calls = set()
     if len(conv) < 2 or conv[0].get("from") != "human":
         return "struct:first_not_human", info
     declared = set()
@@ -167,9 +171,17 @@ def check_structure(sample: dict) -> tuple[str | None, dict]:
                     return "struct:tool_call_no_args", info
                 if declared and name not in declared:
                     return f"struct:undeclared_tool({name})", info
+                # The same call twice = the agent is going in circles; the Qwen3.5 SFT eval's
+                # 13 max-turn cases (all wrong) were such loops. Don't teach it.
+                key = (name, json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False))
+                if key in seen_calls:
+                    return "loop:repeated_tool_call", info
+                seen_calls.add(key)
                 info["tools"].append(name)
             expect = "observation"
         else:  # observation
+            if TOOL_ERROR_RE.search(val[:600]):
+                info["tool_error"] = True  # report-only: error-then-recover examples
             expect = "gpt"
     if conv[-1].get("from") != "gpt":
         return "end:last_not_gpt", info
@@ -343,7 +355,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--eval", nargs="*", default=[], help="eval parquet files for overlap check")
-    ap.add_argument("--model", required=True, help="tokenizer / processor path (Qwen3.5)")
+    ap.add_argument("--model", required=True, help="tokenizer / processor path (the model being fine-tuned)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dataset-name", default="imagentrl_sft_2048", help="key in the written dataset_info.json")
     ap.add_argument("--exclude-manifest", default=None,
@@ -401,6 +413,7 @@ def main() -> None:
             abs_imgs = [str((src_dir / p).resolve()) if not os.path.isabs(p) else p for p in imgs]
             records.append({"id": sid, "source": src, "cat": cat, "tools": info["tools"],
                             "n_calls": info["n_calls"], "boxed": info.get("boxed", "none"),
+                            "tool_error": info["tool_error"],
                             "images": abs_imgs, "sample": s})
     print(f"[struct] {len(records)} passed structure; reasons={dict(reasons)}", flush=True)
     unknown = set(tool_hist) - ENHANCE_TOOLS - CROP_OCR_TOOLS - RETRIEVAL_TOOLS - {"PythonInterpreter", "python_interpreter"}
@@ -554,6 +567,7 @@ def main() -> None:
         "selected_by_category_source": dist(lambda r: f"{r['cat']}/{r['source']}"),
         "selected_tool_calls_hist": dist(lambda r: turn_bin(r["n_calls"])),
         "selected_answer_boxed_style": dist(lambda r: r["boxed"]),
+        "selected_with_tool_error_then_response": sum(r["tool_error"] for r in selected),
         "selected_tool_usage": dict(collections.Counter(t for r in selected for t in r["tools"]).most_common()),
         "selected_samples_using_tool": dict(collections.Counter(t for r in selected for t in set(r["tools"])).most_common()),
         "selected_tokens": {"min": sel_tokens[0], "p50": sel_tokens[len(sel_tokens) // 2],
