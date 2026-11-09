@@ -119,7 +119,7 @@ def phash_int(img) -> int:
 def check_structure(sample: dict) -> tuple[str | None, dict]:
     conv = sample.get("conversations") or []
     info = {"tools": [], "n_calls": 0, "tool_error": False}
-    seen_calls = set()
+    seen_calls, pending = set(), None
     if len(conv) < 2 or conv[0].get("from") != "human":
         return "struct:first_not_human", info
     declared = set()
@@ -171,17 +171,19 @@ def check_structure(sample: dict) -> tuple[str | None, dict]:
                     return "struct:tool_call_no_args", info
                 if declared and name not in declared:
                     return f"struct:undeclared_tool({name})", info
-                # The same call twice = the agent is going in circles; the Qwen3.5 SFT eval's
+                # The same call twice after it already succeeded = the agent is going in circles; the Qwen3.5 SFT eval's
                 # 13 max-turn cases (all wrong) were such loops. Don't teach it.
                 key = (name, json.dumps(call["arguments"], sort_keys=True, ensure_ascii=False))
                 if key in seen_calls:
                     return "loop:repeated_tool_call", info
-                seen_calls.add(key)
+                pending = key
                 info["tools"].append(name)
             expect = "observation"
         else:  # observation
             if TOOL_ERROR_RE.search(val[:600]):
                 info["tool_error"] = True  # report-only: error-then-recover examples
+            elif pending is not None:
+                seen_calls.add(pending)  # a failed call may be retried verbatim
             expect = "gpt"
     if conv[-1].get("from") != "gpt":
         return "end:last_not_gpt", info
