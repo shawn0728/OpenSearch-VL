@@ -81,6 +81,9 @@ def apply_liger_kernel(
         from liger_kernel.transformers import apply_liger_kernel_to_qwen3_next as apply_liger_kernel
     elif model_type == "qwen3_5":
         from liger_kernel.transformers import apply_liger_kernel_to_qwen3_5 as apply_liger_kernel
+    elif model_type == "qwen3_vl":
+        # Without the fused linear+CE the fp32 logits (151k vocab x ~30k tokens) dominate memory.
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen3_vl as apply_liger_kernel
     elif model_type == "gpt_oss":
         try:
             from liger_kernel.transformers import apply_liger_kernel_to_gpt_oss as apply_liger_kernel

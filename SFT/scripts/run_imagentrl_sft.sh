@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ImagentRL SFT launcher for projtool `run_script` (single node, single GPU).
+# ImagentRL SFT launcher for projtool `run_script` (single node; FORCE_TORCHRUN=1 for multi-GPU).
 #
 #   bash SFT/scripts/run_imagentrl_sft.sh SFT/examples/imagentrl/<config>.yaml
 #
@@ -15,7 +15,7 @@ export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
 export WANDB_PROJECT=${WANDB_PROJECT:-imagentrl-sft}
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export FORCE_TORCHRUN=0
+export FORCE_TORCHRUN=${FORCE_TORCHRUN:-0}  # 1 = all visible GPUs via torchrun
 : "${OUTPUT_ROOT:?OUTPUT_ROOT must be set (projtool run_script exports it)}"
 # Credentials (WANDB_API_KEY, …) live outside the synced workspace, mode 600.
 SECRETS=/root/.imagentrl-secrets.env

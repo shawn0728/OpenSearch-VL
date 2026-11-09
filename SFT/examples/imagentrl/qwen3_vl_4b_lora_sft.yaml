@@ -1,0 +1,58 @@
+# ImagentRL — agentic cold-start SFT, Qwen3-VL-4B-Instruct + LoRA, 2× RTX PRO 6000 (96 GB).
+#
+# User-specified: LoRA rank 32 · ≈60% retrieval / 30% crop+OCR / 10% enhancement
+# (SFT/scripts/select_sft_subset.py) · lr 1e-4 · batch size 4 · 1 epoch.
+# Sample count pending user confirmation: 4096 (1024 updates) proposed, 2048 (512) as before.
+# Template and image budget follow the paper's Qwen3-VL SFT configs (examples/agentic_full/).
+# Launch with FORCE_TORCHRUN=1 (both GPUs; the summariser is not needed during SFT).
+
+### model
+model_name_or_path: /root/models/Qwen3-VL-4B-Instruct
+image_max_pixels: 262144            # 512×512, as in the paper's SFT configs
+trust_remote_code: true
+enable_liger_kernel: true          # fused linear+CE: no fp32 logits (151k vocab × ~30k tokens)
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64                      # 2× rank
+lora_dropout: 0.05
+lora_target: all                    # every linear layer of the LLM
+freeze_vision_tower: true           # LoRA on the language model only
+freeze_multi_modal_projector: true
+
+### dataset  (dataset_dir + dataset_info.json are written by the selection run)
+dataset_dir: /root/datasets/sft_subset_q3vl
+dataset: imagentrl_sft_q3vl
+template: qwen3_vl                  # paper's template; JSON <tool_call> instructions match the data
+cutoff_len: 32000                   # selection drops samples > 0.97 × cutoff (Qwen3-VL tokenizer)
+overwrite_cache: false
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /root/sft-runs/qwen3_vl_4b_lora_sft
+logging_steps: 5
+save_steps: 128                     # 8 checkpoints over 1024 updates (use 64 for 2048 samples)
+save_total_limit: 8
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: wandb                    # launcher runs WANDB_MODE=offline (api.wandb.ai 403 from westd)
+run_name: qwen3_vl_4b_lora_sft
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2      # 1 × 2 GPUs × 2 = effective batch size 4
+num_train_epochs: 1.0
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.0
+max_grad_norm: 1.0
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 1800                   # rank 0 tokenises the dataset while rank 1 waits
+seed: 42
